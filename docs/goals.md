@@ -24,7 +24,7 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | B4 | All moving vehicles and aircraft should move smoothly (a small stutter is visible at 90 FPS) | **Done** (confirmed 2026-10-11) |
 | B5 | No random small hitches; camera scrolling as smooth as unit movement | **Solved** with our DXVK build (G-Sync works borderless; confirmed 2026-10-11) |
 | B6 | Selected unit/building panel must never show the placeholder name "Unit name" | **Done** (fix 3, confirmed 2026-10-11) |
-| B3 | Particles should move smoothly at the render rate rather than in 30 Hz steps (e.g. by interpolation) | CPU particles interpolated, **needs in-game test** |
+| B3 | Particles should move smoothly at the render rate rather than in 30 Hz steps (e.g. by interpolation) | CPU particles, trails and bullets smoothed; round 2 **needs in-game test** |
 | F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | Not started |
 
 ## Groundwork needed first
@@ -55,9 +55,10 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 - **B6 (fixed):** Only happens at high FPS, production building → deselect →
   another production building. At 30 FPS one Flash frame always ran between the
   panel's C++ steps; now each state change and button rebuild forces one.
-- **B3:** About 72% of effects are GPU particles, which the shader already animates
-  smoothly. The CPU particles (the rest) are now drawn blended between their
-  30 Hz simulation steps. Trails and streaks aren't covered yet.
+- **B3:** GPU particles (~72%) were already smooth. CPU particles (position,
+  size, colour, fade, rotation), trails and bullet tracers are now drawn blended
+  or moved per frame instead of in 30 Hz steps. Only swarm effects (2) and
+  emission batching remain.
 - **F1:** The main blocker is the 6-phase logic scheduler, which caps the
   client-to-logic ratio at 6 (90 FPS). FPS values that aren't multiples of 15,
   such as 144 and 160, also need fractional scheduling and more precise frame

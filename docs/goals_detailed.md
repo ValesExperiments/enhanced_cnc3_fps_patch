@@ -472,19 +472,51 @@ needs an in-game test.
   vtable +0x14/+0x18; reads positions at particle+0x10 and batches them into
   W3D point groups. KW 1.03 is identical (0x6153C4).
 
-### Fix (implemented)
-The `DefaultDrawModule::Draw` vtable entry is redirected to
-`draw_particles_interpolated`. Per draw, each particle's true position is
-tracked in a 16384-entry side table keyed by pointer (the life counter
-detects pool reuse; a 30 Hz step counter from the gate tells new steps
-apart). The drawn position is temporarily set to `lerp(previous, current, α)`
-with `α = particle accumulator / targetFPS`, and restored after the stock draw.
-Size/colour/alpha keys still step at 30 Hz. Verified offline on all four
-builds; static writes are now 37.
+### Fix (implemented; round 1 confirmed in-game 2026-10-11, round 2 needs a test)
+**CPU particles (Default, Streak, Lightning, RenderObject draw modules).** Each
+draw module's `Draw` (vtable slot 7, `RET 0xC`) is redirected to
+`draw_particles_interpolated`. Per draw, ten values per particle are tracked
+in a 16384-entry side table keyed by pointer: position (+0x10..+0x18), colour
+(module +0x5C → +0x94..+0x9C), alpha (module +0x60 → +0x48), size (module
++0x64 → +0x10) and two rotations (module +0x64 → +0x08/+0x24). The life
+counter detects pool reuse, and a 30 Hz step counter (incremented by the
+particle gate) tells new steps apart. Values are temporarily set to
+`lerp(previous, current, α)` with `α = particle accumulator / targetFPS`, then
+restored after the stock draw (in reverse order, safe if modules are shared).
+RenderObject's `RET` is at +0x4F3 (2025 builds) or +0x4F0 (2012 builds).
+
+**Trails.** `TrailDrawModule::Draw` is redirected to `draw_trails_interpolated`.
+Trail records (storage +0x1C..+0x20, 0x28 bytes) hold an STLport deque of
+0x14-byte points (6 per block); the storage update pushes the head particle's
+position once per step. During the draw, each trail's newest point is moved
+to `lerp(second newest, newest, α)` and restored afterwards, so the front
+segment grows continuously.
+
+**Tracers (bullets).** `W3DTracerManager_Update` (0x834270, gated by "frame
+== +0x90" on the synthetic 30 Hz frame) is entered through a
+`MOV ECX,[ECX+1Ch]; JMP` thunk. That jump is redirected: on frames where the
+30 Hz frame is unchanged, only the movement/expiry pass (0x832B39) runs. The
+pass's call to the per-tracer update (0x8083D7: expiry +0x6C, moves both
+endpoints by `dir × speed(+0x58)`) is redirected to `tracer_update_scaled`,
+which scales the speed by 30/targetFPS for that call. Emission
+(Min/MaxTracersPerFrame, SweepSpeed) and expiry stay on the 30 Hz frame.
+
+All verified offline on TW 1.10, TW 1.9, KW 1.03 and KW 1.02. Static writes
+are now 43.
+
+### User feedback (round 1)
+Many particles became smooth. Still at 30 Hz: infantry/watchtower bullets
+(tracers, fixed in round 2), Ion Cannon blast (CPU flash/shockwave size,
+RenderObject distortion; round 2), Shockwave artillery blast (CPU ring
+**size** growth; round 2).
 
 ### Not covered yet
-Trail, Streak/Lightning, Swarm and RenderObject draw modules; 30 Hz emission
-batching of continuous streams (all types, including GPU).
+Swarm draw module (2 effects, own vertex buffer); 30 Hz emission batching of
+continuous streams (all types, including GPU particles).
+
+Side finding: a camera transition (`CameraTransition_PerFrameAccel_0_03`,
+0x828D30) adds a fixed 0.03 per client frame, so it likely runs 3× faster at
+90 FPS.
 
 ---
 

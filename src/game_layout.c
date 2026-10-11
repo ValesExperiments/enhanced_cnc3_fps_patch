@@ -1044,20 +1044,147 @@ static const u16 g_particle_default_draw_pattern[] = {
     0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x83, 0xB8, 0x68
 };
 
+/* Streak/Lightning draw: same "rendering disabled" checks, larger frames. */
+static const u16 g_particle_streak_draw_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x48, 0x08, 0x00, 0x00,
+    0x80, 0x3D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00,
+    0x56, 0x8B, 0xF1, 0x89, 0x75, 0xBC, 0x0F, 0x85, 0x0C, 0x03, 0x00, 0x00,
+    0x80, 0x3D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00,
+    0x0F, 0x85, 0xFF, 0x02, 0x00, 0x00
+};
+static const u16 g_particle_lightning_draw_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x80, 0x08, 0x00, 0x00,
+    0x80, 0x3D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00,
+    0x56, 0x57, 0x8B, 0xF1, 0x0F, 0x85, 0x66, 0x05, 0x00, 0x00,
+    0x80, 0x3D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00,
+    0x0F, 0x85, 0x59, 0x05, 0x00, 0x00
+};
+/* RenderObject draw: frame setup, then the 0xBAADBEEF null-system sentinel. */
+static const u16 g_particle_render_object_draw_pattern[] = {
+    0x55, 0x8D, 0x6C, 0x24, 0x94, 0x81, 0xEC, 0x30, 0x01, 0x00, 0x00,
+    0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x04, 0x85, 0xC0, 0x89, 0x75, 0x08, 0x75, 0x05,
+    0xB8, 0xEF, 0xBE, 0xAD, 0xBA, 0x8B, 0xC8,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x84, 0xC0, 0x74, 0x07
+};
+
+/* Trail draw: global "trails enabled" flag, then the 0xBAADBEEF sentinel. */
+static const u16 g_particle_trail_draw_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x34,
+    0x80, 0x3D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00,
+    0x53, 0x8B, 0xD9, 0x75, 0x07, 0x33, 0xC0, 0xE9, 0xF7, 0x00, 0x00, 0x00,
+    0x8B, 0x43, 0x04, 0x85, 0xC0, 0x75, 0x05, 0xB8, 0xEF, 0xBE, 0xAD, 0xBA,
+    0x8B, 0x88, 0x84, 0x00, 0x00, 0x00, 0x8B, 0x01, 0x56, 0x57, 0xFF
+};
+
 static BOOL resolve_particle_draw_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
-    ParticleDrawLayout *draw = &game->particle_draw;
+    static const struct {
+        const u16 *pattern;
+        size_t size;
+        /* "RET 0Ch" closing each three-argument draw (2012 builds differ). */
+        u32 ret_offset;
+        u32 ret_offset_alt;
+    } kinds[PARTICLE_DRAW_KINDS] = {
+        { g_particle_default_draw_pattern, ARRAY_COUNT(g_particle_default_draw_pattern), 0x379u, 0x379u },
+        { g_particle_streak_draw_pattern, ARRAY_COUNT(g_particle_streak_draw_pattern), 0x32Cu, 0x32Cu },
+        { g_particle_lightning_draw_pattern, ARRAY_COUNT(g_particle_lightning_draw_pattern), 0x585u, 0x585u },
+        { g_particle_render_object_draw_pattern,
+          ARRAY_COUNT(g_particle_render_object_draw_pattern), 0x4F3u, 0x4F0u },
+        { g_particle_trail_draw_pattern, ARRAY_COUNT(g_particle_trail_draw_pattern), 0x112u, 0x112u }
+    };
     static const u8 ret_0c[] = { 0xC2, 0x0C, 0x00 };
+    ParticleDrawLayout *draw = &game->particle_draw;
+    u32 i;
 
-    if (!FIND_UNIQUE(module, nt, g_particle_default_draw_pattern,
-                     &draw->default_draw_function) ||
-        draw->default_draw_function > game->pe_size_of_image - 0x37Cu ||
-        memcmp(module + draw->default_draw_function + 0x379u, ret_0c, sizeof(ret_0c)) != 0) {
+    for (i = 0; i < PARTICLE_DRAW_KINDS; ++i) {
+        u32 function;
+        if (!find_unique_signature(module, nt, kinds[i].pattern, kinds[i].size, &function) ||
+            function > game->pe_size_of_image - kinds[i].ret_offset - sizeof(ret_0c) ||
+            (memcmp(module + function + kinds[i].ret_offset, ret_0c, sizeof(ret_0c)) != 0 &&
+             memcmp(module + function + kinds[i].ret_offset_alt, ret_0c, sizeof(ret_0c)) != 0) ||
+            !find_unique_readonly_pointer(module, nt, (u32)(uintptr_t)(module + function),
+                                          &draw->draw_vtable_entries[i])) {
+            return FALSE;
+        }
+        draw->draw_functions[i] = function;
+    }
+    return TRUE;
+}
+
+/* W3DTracerManager update: "if (GameClient frame == +0x90) return". */
+static const u16 g_tracer_manager_update_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0x53, 0x56, 0x8B, 0xF1,
+    0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x01, 0x57, 0xFF, 0x50, 0x78, 0x3B, 0x86, 0x90, 0x00, 0x00, 0x00, 0x0F, 0x84
+};
+/* Tracer movement/expiry pass over the instance list at manager +0x3C. */
+static const u16 g_tracer_movement_pass_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0x53, 0x56, 0x8B, 0xF1, 0x57,
+    0x8D, 0x45, 0xF8, 0x8D, 0x5E, 0x3C, 0x50, 0x8B, 0xCB, 0xE8
+};
+/* PUSH frame; LEA ECX,[EDI+8]; CALL tracer update; TEST AL,AL; JNZ +15h. */
+static const u16 g_tracer_update_call_pattern[] = {
+    0xFF, 0x75, 0x08, 0x8D, 0x4F, 0x08,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x84, 0xC0, 0x75, 0x15, 0x8B, 0x47, 0x78
+};
+/* Per-tracer update: "if (frame < expiry(+0x6C))" then move by speed (+0x58). */
+static const u8 g_tracer_update_prologue[] = {
+    0x55, 0x8B, 0xEC, 0x8B, 0x45, 0x08, 0x83, 0xEC, 0x48, 0x56, 0x8B, 0xF1,
+    0x3B, 0x46, 0x6C, 0x0F, 0x83
+};
+
+static BOOL resolve_tracer_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    static const u16 thunk_pattern[] = { 0x8B, 0x49, 0x1C, 0xE9 };
+    TracerLayout *tracers = &game->tracers;
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u32 image_size = game->pe_size_of_image;
+    u32 call;
+    u32 matches = 0;
+    u16 section_index;
+
+    if (!FIND_UNIQUE(module, nt, g_tracer_manager_update_pattern,
+                     &tracers->manager_update_function) ||
+        !FIND_UNIQUE(module, nt, g_tracer_movement_pass_pattern,
+                     &tracers->movement_pass_function) ||
+        !FIND_UNIQUE(module, nt, g_tracer_update_call_pattern, &call) ||
+        call - tracers->movement_pass_function != 0x2Bu) {
         return FALSE;
     }
-    return find_unique_readonly_pointer(
-        module, nt, (u32)(uintptr_t)(module + draw->default_draw_function),
-        &draw->default_draw_vtable_entry);
+    tracers->tracer_update_call.instruction = call + 6u;
+    if (!decode_relative_target(module, image_size, tracers->tracer_update_call.instruction,
+                                0xE8, &tracers->tracer_update_call.target) ||
+        tracers->tracer_update_call.target > image_size - sizeof(g_tracer_update_prologue) ||
+        memcmp(module + tracers->tracer_update_call.target, g_tracer_update_prologue,
+               sizeof(g_tracer_update_prologue)) != 0) {
+        return FALSE;
+    }
+
+    /* "MOV ECX,[ECX+1Ch]; JMP update": exactly one such thunk enters it. */
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections;
+         ++section_index, ++section) {
+        u32 start = section->VirtualAddress;
+        u32 size = section->Misc.VirtualSize;
+        u32 offset;
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
+            start >= image_size || size > image_size - start || size < 8u) {
+            continue;
+        }
+        for (offset = 0; offset <= size - 8u; ++offset) {
+            u32 target;
+            if (!pattern_matches(module + start + offset, thunk_pattern,
+                                 ARRAY_COUNT(thunk_pattern)) ||
+                !decode_relative_target(module, image_size, start + offset + 3u, 0xE9, &target) ||
+                target != tracers->manager_update_function) {
+                continue;
+            }
+            if (++matches > 1) return FALSE;
+            tracers->manager_update_jump.instruction = start + offset + 3u;
+            tracers->manager_update_jump.target = target;
+        }
+    }
+    return matches == 1;
 }
 
 static BOOL resolve_objective_ui_sites(
@@ -1216,6 +1343,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_drawable_interpolation_sites(module, nt, &game) ||
         !resolve_selection_panel_sites(module, nt, &game) ||
         !resolve_particle_draw_sites(module, nt, &game) ||
+        !resolve_tracer_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

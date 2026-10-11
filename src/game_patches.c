@@ -455,12 +455,14 @@ static void THISCALL update_particles_at_retail_rate(void *manager) {
 }
 
 /*
- * CPU particles (DefaultDrawModule) are simulated at the retail 30 Hz, so
- * drawn as-is they move in 30 Hz steps. While a system is drawn, each
- * particle's position is temporarily replaced by a blend of its positions
- * from the previous and the latest 30 Hz step, then restored, so simulation
- * never sees the blended values. The blend lags one step (33 ms), like
- * Drawable interpolation.
+ * CPU particles are simulated at the retail 30 Hz, so drawn as-is they move,
+ * grow, spin and fade in 30 Hz steps. While a system is drawn, each value the
+ * draw module reads (position, colour, alpha, size, rotations) is temporarily
+ * replaced by a blend of its values from the previous and the latest 30 Hz
+ * step, then restored, so simulation never sees blended values. The blend
+ * lags one step (33 ms), like Drawable interpolation. This covers the
+ * Default, Streak, Lightning and RenderObject draw modules, which all read
+ * particles through the storage module's virtual count/get.
  *
  * Particles live in pools, so an address can be reused by a new particle.
  * The remaining-life counter (decremented once per step) tells them apart.
@@ -472,21 +474,38 @@ typedef u8 *(THISCALL *ParticleStorageGetFn)(void *storage, u32 index);
 enum {
     PARTICLE_CACHE_SIZE = 16384, /* power of two */
     PARTICLE_CACHE_PROBES = 16,
-    PARTICLE_DRAW_MAX = 4096
+    PARTICLE_DRAW_MAX = 4096,
+    PARTICLE_BLEND_VALUES = 10,
+    PARTICLE_RESTORE_MAX = PARTICLE_DRAW_MAX * PARTICLE_BLEND_VALUES
+};
+
+/*
+ * Per-particle module objects and the float fields the draw modules read.
+ * A missing module (NULL pointer) simply leaves those values unblended.
+ */
+static const struct {
+    u32 module;  /* particle offset of the module pointer, 0 = particle itself */
+    u32 offset;  /* float field inside it */
+} g_particle_blend_fields[PARTICLE_BLEND_VALUES] = {
+    { 0, 0x10 }, { 0, 0x14 }, { 0, 0x18 },          /* position */
+    { 0x5C, 0x94 }, { 0x5C, 0x98 }, { 0x5C, 0x9C }, /* colour */
+    { 0x60, 0x48 },                                 /* alpha */
+    { 0x64, 0x10 },                                 /* size */
+    { 0x64, 0x08 }, { 0x64, 0x24 }                  /* rotations */
 };
 
 typedef struct ParticleCacheEntry {
     u8 *particle;
     u32 tick;
     u32 life;
-    float previous[3];
-    float current[3];
+    float previous[PARTICLE_BLEND_VALUES];
+    float current[PARTICLE_BLEND_VALUES];
 } ParticleCacheEntry;
 
-static ParticleDrawFn g_original_particle_draw;
+static ParticleDrawFn g_original_particle_draw[PARTICLE_DRAW_KINDS];
 static ParticleCacheEntry g_particle_cache[PARTICLE_CACHE_SIZE];
-static float *g_particle_restore_position[PARTICLE_DRAW_MAX];
-static float g_particle_restore_value[PARTICLE_DRAW_MAX][3];
+static float *g_particle_restore_field[PARTICLE_RESTORE_MAX];
+static float g_particle_restore_value[PARTICLE_RESTORE_MAX];
 
 static ParticleCacheEntry *find_particle_entry(u8 *particle, BOOL *is_new) {
     u32 hash = (u32)(((uintptr_t)particle >> 3) * 2654435761u);
@@ -512,26 +531,28 @@ static ParticleCacheEntry *find_particle_entry(u8 *particle, BOOL *is_new) {
 }
 
 static void track_particle(ParticleCacheEntry *entry, BOOL is_new,
-                           const float *position, u32 life) {
+                           const float *values, u32 life) {
     u32 tick = g_particle_sim_tick;
     /* Same particle: life unchanged within a step, or one less per step. */
     BOOL continues = !is_new && (entry->life == life || entry->life == life + 1u);
 
     if (!continues) {
-        memcpy(entry->previous, position, sizeof(entry->previous));
+        memcpy(entry->previous, values, sizeof(entry->previous));
     } else if (entry->tick != tick) {
         if (entry->tick + 1u == tick) {
             memcpy(entry->previous, entry->current, sizeof(entry->previous));
         } else {
-            memcpy(entry->previous, position, sizeof(entry->previous));
+            memcpy(entry->previous, values, sizeof(entry->previous));
         }
     }
-    memcpy(entry->current, position, sizeof(entry->current));
+    memcpy(entry->current, values, sizeof(entry->current));
     entry->tick = tick;
     entry->life = life;
 }
 
-static int THISCALL draw_particles_interpolated(void *draw_module, void *a, void *b, void *c) {
+static int draw_particles_interpolated(u32 kind, void *draw_module,
+                                       void *a, void *b, void *c) {
+    ParticleDrawFn original = g_original_particle_draw[kind];
     u8 *system = *(u8 **)((u8 *)draw_module + PARTICLE_DRAW_MODULE_SYSTEM);
     void *storage;
     void **vtable;
@@ -543,10 +564,10 @@ static int THISCALL draw_particles_interpolated(void *draw_module, void *a, void
     int result;
 
     if (system == NULL || g_config->target_fps <= g_retail_visual_fps) {
-        return g_original_particle_draw(draw_module, a, b, c);
+        return original(draw_module, a, b, c);
     }
     storage = *(void **)(system + PARTICLE_SYSTEM_STORAGE);
-    if (storage == NULL) return g_original_particle_draw(draw_module, a, b, c);
+    if (storage == NULL) return original(draw_module, a, b, c);
 
     vtable = *(void ***)storage;
     count = ((ParticleStorageCountFn)vtable[PARTICLE_STORAGE_COUNT_SLOT])(storage);
@@ -557,32 +578,180 @@ static int THISCALL draw_particles_interpolated(void *draw_module, void *a, void
 
     for (i = 0; i < count; ++i) {
         u8 *particle = get_particle(storage, i);
+        float *fields[PARTICLE_BLEND_VALUES];
+        float values[PARTICLE_BLEND_VALUES];
         ParticleCacheEntry *entry;
-        float *position;
         BOOL is_new;
         u32 k;
 
         if (particle == NULL) continue;
+        for (k = 0; k < PARTICLE_BLEND_VALUES; ++k) {
+            u8 *base = particle;
+            if (g_particle_blend_fields[k].module != 0) {
+                base = *(u8 **)(particle + g_particle_blend_fields[k].module);
+            }
+            fields[k] = base != NULL ? (float *)(base + g_particle_blend_fields[k].offset) : NULL;
+            values[k] = fields[k] != NULL ? *fields[k] : 0.0f;
+        }
         entry = find_particle_entry(particle, &is_new);
         if (entry == NULL) continue;
-        position = (float *)(particle + PARTICLE_POSITION);
-        track_particle(entry, is_new, position,
+        track_particle(entry, is_new, values,
                        *(u32 *)(particle + PARTICLE_LIFE_REMAINING));
 
-        g_particle_restore_position[saved] = position;
-        memcpy(g_particle_restore_value[saved], position, sizeof(g_particle_restore_value[saved]));
-        ++saved;
-        for (k = 0; k < 3; ++k) {
-            position[k] = entry->previous[k] +
-                          (entry->current[k] - entry->previous[k]) * alpha;
+        for (k = 0; k < PARTICLE_BLEND_VALUES; ++k) {
+            if (fields[k] == NULL) continue;
+            g_particle_restore_field[saved] = fields[k];
+            g_particle_restore_value[saved] = values[k];
+            ++saved;
+            *fields[k] = entry->previous[k] +
+                         (entry->current[k] - entry->previous[k]) * alpha;
         }
     }
 
-    result = g_original_particle_draw(draw_module, a, b, c);
+    result = original(draw_module, a, b, c);
 
-    for (i = 0; i < saved; ++i) {
-        memcpy(g_particle_restore_position[i], g_particle_restore_value[i],
-               sizeof(g_particle_restore_value[i]));
+    /* Reverse order also restores correctly if a module is shared. */
+    while (saved != 0) {
+        --saved;
+        *g_particle_restore_field[saved] = g_particle_restore_value[saved];
+    }
+    return result;
+}
+
+static int THISCALL draw_default_particles(void *module, void *a, void *b, void *c) {
+    return draw_particles_interpolated(PARTICLE_DRAW_DEFAULT, module, a, b, c);
+}
+
+static int THISCALL draw_streak_particles(void *module, void *a, void *b, void *c) {
+    return draw_particles_interpolated(PARTICLE_DRAW_STREAK, module, a, b, c);
+}
+
+static int THISCALL draw_lightning_particles(void *module, void *a, void *b, void *c) {
+    return draw_particles_interpolated(PARTICLE_DRAW_LIGHTNING, module, a, b, c);
+}
+
+static int THISCALL draw_render_object_particles(void *module, void *a, void *b, void *c) {
+    return draw_particles_interpolated(PARTICLE_DRAW_RENDER_OBJECT, module, a, b, c);
+}
+
+/*
+ * Tracers (infantry/defence bullets) move by "speed" per 30 Hz frame, and the
+ * tracer manager only ran on synthetic 30 Hz frames, so bullets advanced in
+ * 30 Hz jumps. The movement/expiry pass now also runs on the client frames in
+ * between, with each tracer's speed scaled by 30/targetFPS during its update.
+ * Emission and expiry still follow the 30 Hz frame, so authored counts and
+ * lifetimes are unchanged; tracers move linearly, so this adds no lag.
+ */
+typedef void(THISCALL *TracerManagerUpdateFn)(void *manager);
+typedef void(THISCALL *TracerMovementPassFn)(void *manager, u32 frame);
+typedef u8(THISCALL *TracerUpdateFn)(void *tracer, u32 frame);
+static TracerManagerUpdateFn g_original_tracer_manager_update;
+static TracerMovementPassFn g_tracer_movement_pass;
+static TracerUpdateFn g_original_tracer_update;
+
+static void THISCALL tracer_manager_update_every_frame(void *manager) {
+    void *game_client = *(void **)game_address(
+        g_game, g_game->drawable_physics.game_client_pointer);
+    u32 frame;
+
+    if (game_client == NULL) {
+        g_original_tracer_manager_update(manager);
+        return;
+    }
+    frame = get_retail_visual_frame(game_client);
+    if (frame != *(u32 *)((u8 *)manager + TRACER_MANAGER_LAST_FRAME)) {
+        g_original_tracer_manager_update(manager);
+    } else {
+        g_tracer_movement_pass(manager, frame);
+    }
+}
+
+static u8 THISCALL tracer_update_scaled(void *tracer, u32 frame) {
+    float *speed = (float *)((u8 *)tracer + TRACER_INSTANCE_SPEED);
+    float retail_speed = *speed;
+    u8 result;
+
+    *speed = retail_speed * (float)g_retail_visual_fps / (float)g_config->target_fps;
+    result = g_original_tracer_update(tracer, frame);
+    *speed = retail_speed;
+    return result;
+}
+
+/*
+ * Trails gain one point per 30 Hz step (the head particle's new position is
+ * pushed onto the back of the trail), so their front grew in 30 Hz jumps.
+ * While a trail system is drawn, its newest point is moved from the previous
+ * point toward its real position by the elapsed fraction of the step, so the
+ * front segment grows continuously. Points are restored after the draw.
+ */
+typedef struct StlDequeIterator {
+    u8 *cur;
+    u8 *first;
+    u8 *last;
+    u8 **node;
+} StlDequeIterator;
+
+static u32 trail_point_count(const u8 *record) {
+    const StlDequeIterator *start = (const StlDequeIterator *)record;
+    const StlDequeIterator *finish = (const StlDequeIterator *)(record + sizeof(StlDequeIterator));
+    i32 count = (i32)(finish->node - start->node) * TRAIL_POINTS_PER_BLOCK +
+                (i32)(finish->cur - finish->first) / TRAIL_POINT_SIZE -
+                TRAIL_POINTS_PER_BLOCK +
+                (i32)(start->last - start->cur) / TRAIL_POINT_SIZE;
+    return count > 0 ? (u32)count : 0u;
+}
+
+static float *trail_point(const u8 *record, u32 index) {
+    const StlDequeIterator *start = (const StlDequeIterator *)record;
+    i32 offset = (i32)index + (i32)(start->cur - start->first) / TRAIL_POINT_SIZE;
+    i32 block = offset >= 0 ? offset / TRAIL_POINTS_PER_BLOCK
+                            : -((-offset - 1) / TRAIL_POINTS_PER_BLOCK) - 1;
+    return (float *)(start->node[block] +
+                     (offset - block * TRAIL_POINTS_PER_BLOCK) * TRAIL_POINT_SIZE);
+}
+
+static int THISCALL draw_trails_interpolated(void *module, void *a, void *b, void *c) {
+    ParticleDrawFn original = g_original_particle_draw[PARTICLE_DRAW_TRAIL];
+    u8 *system = *(u8 **)((u8 *)module + PARTICLE_DRAW_MODULE_SYSTEM);
+    u8 *storage;
+    u8 *record;
+    u8 *end;
+    float alpha;
+    u32 saved = 0;
+    int result;
+
+    if (system == NULL || g_config->target_fps <= g_retail_visual_fps) {
+        return original(module, a, b, c);
+    }
+    storage = *(u8 **)(system + PARTICLE_SYSTEM_STORAGE);
+    if (storage == NULL) return original(module, a, b, c);
+
+    alpha = (float)g_particle_update_accumulator / (float)g_config->target_fps;
+    record = *(u8 **)(storage + TRAIL_STORAGE_RECORDS_BEGIN);
+    end = *(u8 **)(storage + TRAIL_STORAGE_RECORDS_END);
+    for (; record != NULL && record < end && saved + 3u <= PARTICLE_RESTORE_MAX;
+         record += TRAIL_RECORD_SIZE) {
+        u32 count = trail_point_count(record);
+        float *newest;
+        float *previous;
+        u32 k;
+
+        if (count < 2u) continue;
+        newest = trail_point(record, count - 1u);
+        previous = trail_point(record, count - 2u);
+        for (k = 0; k < 3; ++k) {
+            g_particle_restore_field[saved] = &newest[k];
+            g_particle_restore_value[saved] = newest[k];
+            ++saved;
+            newest[k] = previous[k] + (newest[k] - previous[k]) * alpha;
+        }
+    }
+
+    result = original(module, a, b, c);
+
+    while (saved != 0) {
+        --saved;
+        *g_particle_restore_field[saved] = g_particle_restore_value[saved];
     }
     return result;
 }
@@ -1189,6 +1358,30 @@ static void install_frame_authored_effects(PatchInstaller *installer) {
                         visual->anim2d_update_frame_call, NO_INTERLEAVED_PUSH);
 }
 
+static void install_tracer_motion(PatchInstaller *installer) {
+    const TracerLayout *tracers = &g_game->tracers;
+    u8 jump_patch[5] = { 0xE9, 0, 0, 0, 0 };
+    u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
+
+    g_original_tracer_manager_update = (TracerManagerUpdateFn)game_address(
+        g_game, tracers->manager_update_function);
+    g_tracer_movement_pass = (TracerMovementPassFn)game_address(
+        g_game, tracers->movement_pass_function);
+    g_original_tracer_update = (TracerUpdateFn)game_address(
+        g_game, tracers->tracer_update_call.target);
+
+    encode_rel32(&jump_patch[1],
+                 game_address(g_game, tracers->manager_update_jump.instruction + 5u),
+                 tracer_manager_update_every_frame);
+    patch_branch(installer, "tracer manager update jump",
+                 &tracers->manager_update_jump, 0xE9, jump_patch, sizeof(jump_patch));
+    encode_rel32(&call_patch[1],
+                 game_address(g_game, tracers->tracer_update_call.instruction + 5u),
+                 tracer_update_scaled);
+    patch_branch(installer, "tracer update call",
+                 &tracers->tracer_update_call, 0xE8, call_patch, sizeof(call_patch));
+}
+
 static void install_drawable_physics_timing(PatchInstaller *installer) {
     const DrawablePhysicsLayout *physics = &g_game->drawable_physics;
     u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
@@ -1245,11 +1438,26 @@ static void install_particle_and_cursor_timing(PatchInstaller *installer) {
                  particle_patch, sizeof(particle_patch));
 
     {
-        void *draw = game_address(g_game, g_game->particle_draw.default_draw_function);
-        g_original_particle_draw = (ParticleDrawFn)draw;
-        patch_pointer(installer, "CPU particle DefaultDrawModule draw vtable entry",
-                      g_game->particle_draw.default_draw_vtable_entry, draw,
-                      (const void *)draw_particles_interpolated);
+        static const char *const names[PARTICLE_DRAW_KINDS] = {
+            "particle DefaultDrawModule draw vtable entry",
+            "particle StreakDrawModule draw vtable entry",
+            "particle LightningDrawModule draw vtable entry",
+            "particle RenderObjectDrawModule draw vtable entry",
+            "particle TrailDrawModule draw vtable entry"
+        };
+        const ParticleDrawFn wrappers[PARTICLE_DRAW_KINDS] = {
+            draw_default_particles, draw_streak_particles,
+            draw_lightning_particles, draw_render_object_particles,
+            draw_trails_interpolated
+        };
+        u32 kind;
+        for (kind = 0; kind < PARTICLE_DRAW_KINDS; ++kind) {
+            void *draw = game_address(g_game, g_game->particle_draw.draw_functions[kind]);
+            g_original_particle_draw[kind] = (ParticleDrawFn)draw;
+            patch_pointer(installer, names[kind],
+                          g_game->particle_draw.draw_vtable_entries[kind], draw,
+                          (const void *)wrappers[kind]);
+        }
     }
 
     expect_bytes(installer, "GPU particle expiry instruction",
@@ -1479,6 +1687,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_camera_timing(&installer);
     install_frame_authored_effects(&installer);
     install_drawable_physics_timing(&installer);
+    install_tracer_motion(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);

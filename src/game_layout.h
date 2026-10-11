@@ -117,11 +117,35 @@ typedef struct DrawableInterpolationLayout {
     u32 window_immediates[2];
 } DrawableInterpolationLayout;
 
+enum ParticleDrawKind {
+    PARTICLE_DRAW_DEFAULT,
+    PARTICLE_DRAW_STREAK,
+    PARTICLE_DRAW_LIGHTNING,
+    PARTICLE_DRAW_RENDER_OBJECT,
+    PARTICLE_DRAW_TRAIL,
+    PARTICLE_DRAW_KINDS
+};
+
 typedef struct ParticleDrawLayout {
-    /* FXParticleSystem::DefaultDrawModule draw (CPU particles) and its vtable slot. */
-    u32 default_draw_function;
-    u32 default_draw_vtable_entry;
+    /*
+     * FXParticleSystem::{Default,Streak,Lightning,RenderObject}DrawModule::Draw
+     * (vtable slot 7) for CPU-simulated particles, and their vtable slots.
+     */
+    u32 draw_functions[PARTICLE_DRAW_KINDS];
+    u32 draw_vtable_entries[PARTICLE_DRAW_KINDS];
 } ParticleDrawLayout;
+
+typedef struct TracerLayout {
+    /*
+     * W3DTracerManager per-client-frame update (gated on the frame number),
+     * the thunk JMP that enters it, its tracer movement/expiry pass, and the
+     * pass's call of the per-tracer update.
+     */
+    u32 manager_update_function;
+    BranchSite manager_update_jump;
+    u32 movement_pass_function;
+    BranchSite tracer_update_call;
+} TracerLayout;
 
 typedef struct SelectionPanelLayout {
     /*
@@ -186,6 +210,7 @@ typedef struct GameLayout {
     DrawableInterpolationLayout drawable_interpolation;
     SelectionPanelLayout selection_panel;
     ParticleDrawLayout particle_draw;
+    TracerLayout tracers;
 } GameLayout;
 
 typedef enum GameResolveResult {
@@ -240,6 +265,20 @@ enum {
     PARTICLE_STORAGE_GET_SLOT = 6,
     PARTICLE_POSITION = 0x10,
     PARTICLE_LIFE_REMAINING = 0x40,
+    /*
+     * Trail storage: per-trail records (0x28 bytes, at storage +0x1C..+0x20)
+     * holding an STLport deque of 0x14-byte points, 6 per block; the newest
+     * point (the head particle's latest 30 Hz position) is at the back.
+     */
+    TRAIL_STORAGE_RECORDS_BEGIN = 0x1C,
+    TRAIL_STORAGE_RECORDS_END = 0x20,
+    TRAIL_RECORD_SIZE = 0x28,
+    TRAIL_POINT_SIZE = 0x14,
+    TRAIL_POINTS_PER_BLOCK = 6,
+
+    /* W3DTracerManager last processed frame; tracer speed per 30 Hz frame. */
+    TRACER_MANAGER_LAST_FRAME = 0x90,
+    TRACER_INSTANCE_SPEED = 0x58,
 
     /* SingleUnitModeHandler -> SelectionDetails::PanelImpl -> panel gadget. */
     SELECTION_HANDLER_PANEL = 0x14,
