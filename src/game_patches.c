@@ -314,6 +314,80 @@ static PhysicsXformCacheEntry *find_physics_entry(void *drawable, u32 retail_fra
     return reusable;
 }
 
+/*
+ * Diagnostic (debug_motion_frames > 0): follow the first moving vehicle of a
+ * session and log one line per client frame describing how its drawn
+ * position is interpolated between logic ticks. Offsets are TW 1.10 Drawable
+ * and Object fields (see docs/goals_detailed.md, B4).
+ */
+enum {
+    DRAWABLE_HISTORY_FRAME = 0x138,
+    DRAWABLE_FLAGS = 0x144,
+    DRAWABLE_HISTORY_PREVIOUS = 0xD0,
+    DRAWABLE_HISTORY_CURRENT = 0xDC,
+    DRAWABLE_INTERPOLATED_POSITION = 0x124,
+    DRAWABLE_OBJECT = 0x140,
+    OBJECT_POSITION = 0x38,
+    OBJECT_PREVIOUS_POSITION = 0x1A8,
+    OBJECT_PREVIOUS_POSITION_VALID = 0x1C1
+};
+
+static void *g_motion_drawable;
+static u32 g_motion_frames_logged;
+static u32 g_motion_last_frame;
+static LARGE_INTEGER g_motion_start;
+static LARGE_INTEGER g_motion_frequency;
+
+static void log_motion_sample(void *drawable, u32 actual_frame) {
+    u8 *d = (u8 *)drawable;
+    u8 *object;
+    u8 *engine;
+    const float *p1 = (const float *)(d + DRAWABLE_HISTORY_PREVIOUS);
+    const float *p2 = (const float *)(d + DRAWABLE_HISTORY_CURRENT);
+    const float *out = (const float *)(d + DRAWABLE_INTERPOLATED_POSITION);
+    const float *pos;
+    const float *prev;
+    LARGE_INTEGER now;
+    double us;
+
+    if (g_config->debug_motion_frames == 0 ||
+        g_motion_frames_logged >= g_config->debug_motion_frames) {
+        return;
+    }
+    object = *(u8 **)(d + DRAWABLE_OBJECT);
+    if (object == NULL) return;
+    if (g_motion_drawable == NULL) {
+        /* Lock onto the first drawable whose logic history shows movement. */
+        if (p1[0] == p2[0] && p1[1] == p2[1]) return;
+        g_motion_drawable = drawable;
+        QueryPerformanceFrequency(&g_motion_frequency);
+        QueryPerformanceCounter(&g_motion_start);
+        log_line("motion log: frame us phase s hist dflags | obj.x obj.y prev.x prev.y"
+                 " prevok | p1.x p1.y p2.x p2.y | out.x out.y");
+    }
+    if (drawable != g_motion_drawable || actual_frame == g_motion_last_frame) return;
+    g_motion_last_frame = actual_frame;
+    engine = *(u8 **)game_address(g_game, g_game->timing.game_engine_pointer);
+    pos = (const float *)(object + OBJECT_POSITION);
+    prev = (const float *)(object + OBJECT_PREVIOUS_POSITION);
+    QueryPerformanceCounter(&now);
+    us = (double)(now.QuadPart - g_motion_start.QuadPart) * 1000000.0 /
+         (double)g_motion_frequency.QuadPart;
+    log_printf("M %u %.0f %u %.4f %u 0x%02X | %.3f %.3f %.3f %.3f %u | "
+               "%.3f %.3f %.3f %.3f | %.3f %.3f",
+               actual_frame, us,
+               engine ? *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) : 0u,
+               engine ? (double)*(float *)(engine + ENGINE_LOGIC_PHASE_INTERPOLATION) : -1.0,
+               *(u32 *)(d + DRAWABLE_HISTORY_FRAME), d[DRAWABLE_FLAGS],
+               (double)pos[0], (double)pos[1], (double)prev[0], (double)prev[1],
+               object[OBJECT_PREVIOUS_POSITION_VALID],
+               (double)p1[0], (double)p1[1], (double)p2[0], (double)p2[1],
+               (double)out[0], (double)out[1]);
+    if (++g_motion_frames_logged == g_config->debug_motion_frames) {
+        log_line("motion log: complete");
+    }
+}
+
 static u8 THISCALL calc_physics_xform_interpolated(void *drawable, float *info) {
     void *game_client = *(void **)game_address(
         g_game, g_game->drawable_physics.game_client_pointer);
@@ -327,6 +401,7 @@ static u8 THISCALL calc_physics_xform_interpolated(void *drawable, float *info) 
 
     if (game_client == NULL) return g_original_calc_physics_xform(drawable, info);
     actual_frame = read_client_frame(game_client);
+    log_motion_sample(drawable, actual_frame);
     retail_frame = to_retail_visual_frame(actual_frame);
     entry = find_physics_entry(drawable, retail_frame);
     if (entry == NULL) return g_original_calc_physics_xform(drawable, info);
@@ -597,6 +672,7 @@ static void patch_bytes(PatchInstaller *installer, const char *name, u32 rva,
             &installer->transaction, destination, replacement, size)) {
         log_text("ERROR: could not write runtime patch at ");
         log_line(name);
+        log_u32("  writes already recorded=", (u32)installer->transaction.count);
         installer->ok = FALSE;
     }
 }
@@ -874,6 +950,31 @@ static void install_drawable_physics_timing(PatchInstaller *installer) {
                  &physics->apply_call, 0xE8, call_patch, sizeof(call_patch));
 }
 
+/*
+ * Units are drawn on a Catmull-Rom spline between their previous and current
+ * logic positions. The history refresh and the spline evaluation only run
+ * while "clientFrame - Drawable::historyFrame < 6": three logic ticks at
+ * stock 30 FPS, but exactly one tick at 90 FPS. A measured 90 FPS trace
+ * showed the test failing on every sixth frame, freezing the drawn position
+ * for one frame (a 15 Hz stutter) and leaving stopped units short of their
+ * destination until a stale-transform fallback snapped them into place.
+ * Restore the stock three-tick window: 3 * targetFPS / 15 client frames.
+ */
+static void install_drawable_interpolation_window(PatchInstaller *installer) {
+    static const char *const names[2] = {
+        "interpolation history window", "interpolation spline window"
+    };
+    const u8 stock_window = 6u;
+    u8 window = (u8)(3u * (g_config->target_fps / LOGIC_FPS));
+    u32 i;
+
+    for (i = 0; i < 2; ++i) {
+        patch_bytes(installer, names[i],
+                    g_game->drawable_interpolation.window_immediates[i],
+                    &stock_window, &window, sizeof(window));
+    }
+}
+
 static void install_particle_and_cursor_timing(PatchInstaller *installer) {
     static const u8 gpu_opcode[] = { 0x0F, 0xAF, 0x05 };
     static const u8 radius_opcode[] = { 0xD8, 0x0D };
@@ -1114,6 +1215,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_camera_timing(&installer);
     install_frame_authored_effects(&installer);
     install_drawable_physics_timing(&installer);
+    install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);
     install_w3d_clock(&installer);
@@ -1124,6 +1226,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
 
     g_installed = TRUE;
     log_line("FPS patch installed successfully");
+    log_u32("Static patch writes installed=", (u32)installer.transaction.count);
     return TRUE;
 
 rollback:
@@ -1179,6 +1282,8 @@ void game_patches_reset_state(void) {
         g_limiter_interval_divisor = 0;
         /* Drawables from a previous session may share addresses with new ones. */
         memset(g_physics_cache, 0, sizeof(g_physics_cache));
+        /* Each session may follow a new vehicle for the motion diagnostic. */
+        g_motion_drawable = NULL;
         reset_keyboard_clock();
         /* First direct reader gets floor(990/FPS); the hook distributes remainder. */
         *(u32 *)game_address(g_game, g_game->timing.w3d_milliseconds_per_frame) =

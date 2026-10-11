@@ -20,8 +20,8 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | # | Goal | Status |
 |---|------|--------|
 | B1 | Objective markers should not glitch for a few frames when they appear on screen in missions | **Done** (confirmed in-game 2026-10-11) |
-| B2 | Procedural unit motion (vehicle turning, suspension and body wobble) should look the same as at 30 FPS, not exaggerated | Fix implemented, **needs in-game test** |
-| B4 | All moving vehicles and aircraft should move smoothly (a small stutter is visible at 90 FPS) | May be fixed by B2; retest |
+| B2 | Procedural unit motion (vehicle turning, suspension and body wobble) should look the same as at 30 FPS, not exaggerated | **Done** (Surveyor bobbing fixed, confirmed 2026-10-11) |
+| B4 | All moving vehicles and aircraft should move smoothly (a small stutter is visible at 90 FPS) | Fix implemented, **needs in-game test** |
 | B3 | Particles should move smoothly at the render rate rather than in 30 Hz steps (e.g. by interpolation) | Not started |
 | F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | Not started |
 
@@ -40,9 +40,13 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
   its screen position on the next APT frame, and APT frames advance on a real
   ~30 Hz clock, so at high FPS the clip is drawn unpositioned for 1–2 frames.
   The fix asks APT for an immediate tick whenever a marker is created.
-- **B2 (root cause found):** The locomotor tilt/suspension springs ran once
+- **B2 (fixed):** The locomotor tilt/suspension springs ran once
   per rendered frame. They now run at the retail 30 Hz, and the result is
   smoothly blended in between.
+- **B4 (root cause measured):** The game only refreshes a unit's smoothed
+  position for 6 drawn frames after it moves. That's 3 logic ticks at 30 FPS
+  but only 1 at 90, so every 6th frame froze, and stopped units were left
+  short and then snapped. The window now scales with FPS.
 - **B3:** The patch deliberately runs CPU particle simulation at 30 Hz. The
   plan is to keep it there and interpolate (or extrapolate) particle positions
   when drawing.

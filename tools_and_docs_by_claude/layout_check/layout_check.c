@@ -137,6 +137,7 @@ static int check(const char *path) {
         { "w3d_clock", resolve_w3d_clock_sites },
         { "objective_ui", resolve_objective_ui_sites },
         { "drawable_physics", resolve_drawable_physics_sites },
+        { "drawable_interpolation", resolve_drawable_interpolation_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -175,6 +176,12 @@ static int check(const char *path) {
                full.visual.particle_simulation.instruction,
                full.visual.anim2d_timestamp_frame_call,
                full.visual.anim2d_update_frame_call);
+        printf("  timing: game_engine_ptr=0x%X global_data_ptr=0x%X client_fps=0x%X\n",
+               full.timing.game_engine_pointer, full.timing.global_data_pointer,
+               full.timing.client_fps);
+        printf("  interpolation windows: imm RVAs 0x%X 0x%X\n",
+               full.drawable_interpolation.window_immediates[0],
+               full.drawable_interpolation.window_immediates[1]);
         printf("  objective UI: apt_player=0x%X add_indicator vtable=0x%X "
                "fns=0x%X/0x%X/0x%X\n",
                full.objective_ui.apt_player_pointer,

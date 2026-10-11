@@ -108,6 +108,15 @@ typedef struct DrawablePhysicsLayout {
     BranchSite apply_call;
 } DrawablePhysicsLayout;
 
+typedef struct DrawableInterpolationLayout {
+    /*
+     * The two "clientFrame - Drawable::historyFrame < 6" tests (history
+     * refresh and Catmull-Rom position evaluation). Stock 6 client frames is
+     * three logic ticks at 30 FPS; these are the RVAs of the 0x06 immediates.
+     */
+    u32 window_immediates[2];
+} DrawableInterpolationLayout;
+
 typedef struct ObjectiveUiLayout {
     /* Global AptPlayer* stored by the AptPlayer constructor. */
     u32 apt_player_pointer;
@@ -152,6 +161,7 @@ typedef struct GameLayout {
     PacingLayout pacing;
     ObjectiveUiLayout objective_ui;
     DrawablePhysicsLayout drawable_physics;
+    DrawableInterpolationLayout drawable_interpolation;
 } GameLayout;
 
 typedef enum GameResolveResult {

@@ -9,5 +9,7 @@ void log_text(const char *text);
 void log_line(const char *text);
 void log_u32(const char *label, u32 value);
 void log_hex32(const char *label, u32 value);
+/* Formatted diagnostic line; output longer than 511 bytes is truncated. */
+void log_printf(const char *format, ...);
 
 #endif

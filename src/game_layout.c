@@ -861,6 +861,66 @@ static BOOL resolve_drawable_physics_sites(
            physics->apply_call.target == body - sizeof(dispatcher_prologue);
 }
 
+/*
+ * "MOV ECX,[g_theGameClient]; MOV EAX,[ECX]; CALL [EAX+78h]; SUB EAX,<history>;
+ * CMP EAX,6". TW addresses Drawable+0x138 directly (disp32); KW first loads
+ * its address into a register.
+ */
+static const u16 g_interpolation_window_disp32_pattern[] = {
+    0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x01, 0xFF, 0x50, 0x78,
+    0x2B, PATTERN_ANY, 0x38, 0x01, 0x00, 0x00, 0x83, 0xF8, 0x06
+};
+static const u16 g_interpolation_window_indirect_pattern[] = {
+    0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x01, 0xFF, 0x50, 0x78,
+    0x2B, PATTERN_ANY, 0x83, 0xF8, 0x06
+};
+
+static BOOL resolve_drawable_interpolation_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    DrawableInterpolationLayout *interp = &game->drawable_interpolation;
+    const u16 *patterns[2] = {
+        g_interpolation_window_disp32_pattern, g_interpolation_window_indirect_pattern
+    };
+    const size_t sizes[2] = {
+        ARRAY_COUNT(g_interpolation_window_disp32_pattern),
+        ARRAY_COUNT(g_interpolation_window_indirect_pattern)
+    };
+    u32 game_client = (u32)(uintptr_t)(module + game->drawable_physics.game_client_pointer);
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u32 matches = 0;
+    u16 section_index;
+    u32 p;
+
+    /* Exactly two windows must exist, both reading the same GameClient. */
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections;
+         ++section_index, ++section) {
+        u32 start = section->VirtualAddress;
+        u32 size = section->Misc.VirtualSize;
+        u32 offset;
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
+            start >= nt->OptionalHeader.SizeOfImage ||
+            size > nt->OptionalHeader.SizeOfImage - start) {
+            continue;
+        }
+        for (p = 0; p < 2; ++p) {
+            if (size < sizes[p]) continue;
+            for (offset = 0; offset <= size - (u32)sizes[p]; ++offset) {
+                u8 *candidate = module + start + offset;
+                if (!pattern_matches(candidate, patterns[p], sizes[p]) ||
+                    load_u32(candidate + 2u) != game_client) {
+                    continue;
+                }
+                if (matches == ARRAY_COUNT(interp->window_immediates)) return FALSE;
+                interp->window_immediates[matches++] =
+                    start + offset + (u32)sizes[p] - 1u;
+            }
+        }
+    }
+    return matches == ARRAY_COUNT(interp->window_immediates);
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -1014,6 +1074,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_w3d_clock_sites(module, nt, &game) ||
         !resolve_objective_ui_sites(module, nt, &game) ||
         !resolve_drawable_physics_sites(module, nt, &game) ||
+        !resolve_drawable_interpolation_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

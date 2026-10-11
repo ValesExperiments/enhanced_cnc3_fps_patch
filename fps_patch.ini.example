@@ -8,3 +8,7 @@ target_fps=90
 
 ; Write fps_patch.log next to the DLL.
 logging=1
+
+; Diagnostic: log this many frames of one moving vehicle's interpolation
+; to fps_patch.log (requires logging=1). 0 = off.
+debug_motion_frames=0

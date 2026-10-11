@@ -9,6 +9,8 @@ typedef struct Config {
     BOOL valid;
     u32 target_fps;
     BOOL logging;
+    /* Diagnostic: client frames of one moving vehicle to log (0 = off). */
+    u32 debug_motion_frames;
 } Config;
 
 void config_set_defaults(Config *config);

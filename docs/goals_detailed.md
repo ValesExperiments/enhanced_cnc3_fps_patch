@@ -177,8 +177,9 @@ out. Then this section moves to `implementation.md`.
 
 ## B2. Procedural unit animation is too intense
 
-**Status:** root cause found and fix implemented (2026-10-11). It still needs
-an in-game test.
+**Status:** fixed. Confirmed in-game on 2026-10-11: the Surveyor no longer bobs
+and there are no odd tilts. The Harvester improved; its remaining slight
+stutter belongs to B4.
 
 ### Symptom
 Some vehicles turn glitchily, and vehicle suspension/body wobble is
@@ -232,14 +233,76 @@ and an aircraft too.
 
 ## B4. All vehicles and aircraft stutter slightly while moving (90 FPS)
 
-**Status:** reported by the user on 2026-10-11; may be fixed by B2.
+**Status:** root cause measured and fix implemented (2026-10-11). It still
+needs an in-game test. The user's clue: units **snap** into place when they
+stop.
 
-The physics-transform integrators derive acceleration-tilt from per-frame
-velocity changes. Logic velocity only changes on 15 Hz ticks, so at 90 FPS a
-spike landed on 1 client frame in 6 (stock: 1 in 2). Aircraft use the same
-dispatcher (hover/wings/thrust appearances). If the stutter remains after the
-B2 fix, investigate the Drawable position interpolation between logic
-phases next (`update_phase_interpolation`, the client-slice Drawable flush).
+### Measurement (debug_motion_frames, harvester at 90 FPS; temp/logs/motion_run2.log)
+On every logic tick, the phase-2 client frame repeated the previous frame's
+drawn position, because `clientFrame - historyFrame` reached exactly 6 there
+and the `< 6` test failed. That's one frozen frame in six, i.e. a 15 Hz
+stutter. The blend fraction itself was aligned correctly (the new pair arrives
+at phase 1 with s = 1/6 and reaches s = 1 at phase 6), so hypothesis 2 is ruled
+out. When a unit stops, the final pair arrives 5 frames after the last move,
+gets one frame at s = 1/6, and then freezes there until the "stale for 2 logic
+frames" fallback snaps it to the Object transform.
+
+### Fix (implemented)
+Both `CMP EAX,6` windows are rewritten to `3 × targetFPS/15` client frames
+(the stock three-tick window). They're resolved by signature in two shapes:
+TW's `SUB EAX,[reg+0x138]` (disp32) and KW's `SUB EAX,[reg]`. Exactly two
+matches are required, each preceded by `MOV ECX,[g_theGameClient]` with the
+same global as the physics resolver. Verified offline on TW 1.10, TW 1.9,
+KW 1.03 and KW 1.02.
+
+### How drawn positions are interpolated (TW 1.10 VAs)
+- Units are drawn one logic tick behind. `Drawable_getInterpolatedPosition`
+  (0x479410) evaluates `D3DXVec3CatmullRom(p0, p1, p2, p3, s)`, with
+  `p1 = Object previous position`, `p2 = current position` and
+  `p3 = 2*p2 - p1`. `s` is **`GameEngine+0x48` = phase/6**, written by
+  `GameEngine_UpdatePhaseInterpolation`.
+- `Drawable_getInterpolatedTransform` (0x48187A) also lerps the rotation
+  matrix (previous `+0x64`, current `+0x94`) with the same `s`. If the
+  drawable's last logic update (`+0x47C`) is older than `logicFrame - 2`, it
+  uses the Object transform directly: a **snap**.
+- History refresh `FUN_00474eaf` and the spline evaluation both only run while
+  `clientFrame - Drawable+0x138 < 6`. That's a **hard-coded 6 client frames**:
+  3 logic ticks at stock 30 FPS, but only 1 tick at 90 FPS.
+  `Drawable+0x138` is set to the client frame by `Drawable::onTransformChanged`
+  (0x4748D6, virtual).
+- Logic phases: behaviour update lists run in phases 3–6 (list 0 split over
+  phases 3/4, lists 1–2 in phase 5, list 3 in phase 6). This looks like
+  Generals' INITIAL/PHYSICS/NORMAL/FINAL update phases, so movement probably
+  happens in phase 5.
+- Other `+0x48`/`+0x44` consumers exist (0x46F10B transition lerp, W3D draw
+  modules around 0x8476AD/0x850FFE/0x8580A2, …) and may need the same
+  treatment.
+- Side finding: `Drawable::updateDrawable` (0x48353F) has a raw
+  `getFrame() % N` counter (+0x150/+0x154), probably scripted "flash unit"
+  effects, which will flash faster at high FPS.
+
+### Hypotheses (resolved by the measurement above)
+1. **Confirmed.** The 6-frame window has no slack at 90 FPS, so the spline sometimes isn't
+   evaluated and the drawn position freezes for a frame (stutter). When a
+   unit stops, the drawn position freezes short of the end until the
+   "stale → use Object transform" branch snaps it.
+2. **Ruled out.** `s = phase/6` isn't aligned with the frame in which a new
+   previous/current pair arrives, so `s` can wrap from 1 back to a small
+   value on the same pair (a small backwards step).
+
+### Diagnostic (added 2026-10-11)
+`debug_motion_frames=N` in `fps_patch.ini` makes the patch follow the first
+vehicle whose history shows movement and log one `M` line per client frame:
+frame, µs timestamp, engine phase, `s`, `historyFrame`, drawable flags, Object
+position and previous position, `p1`/`p2`, and the interpolated position.
+These are TW 1.10 offsets; they may be wrong on KW.
+
+### Candidate fix (after the log confirms the cause)
+- Scale the two `< 6` windows to `3 * R`.
+- Give the spline/matrix blends a per-drawable `s` that advances `1/R` per
+  client frame from the frame its new history pair arrived, clamped at 1.
+  This is timing-independent and lands exactly on the final position when a
+  unit stops.
 
 ---
 

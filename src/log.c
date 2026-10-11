@@ -1,5 +1,6 @@
 #include "log.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 
 static HANDLE g_log_file = INVALID_HANDLE_VALUE;
@@ -49,4 +50,18 @@ void log_hex32(const char *label, u32 value) {
     snprintf(text, sizeof(text), "0x%08X", (unsigned int)value);
     log_text(label);
     log_line(text);
+}
+
+void log_printf(const char *format, ...) {
+    char text[512];
+    va_list args;
+    int length;
+    if (!g_log_enabled) return;
+    va_start(args, format);
+    length = vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+    if (length < 0) return;
+    if ((size_t)length >= sizeof(text)) length = (int)sizeof(text) - 1;
+    write_raw(text, (size_t)length);
+    write_raw("\r\n", 2);
 }

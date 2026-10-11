@@ -95,6 +95,19 @@ Fix or remove anything that turns out to be wrong.
   patch's synthetic 30 Hz frame throttles the system to the retail rate. If
   the caller needs a value every frame, add a cache/blend wrapper (B2's
   `calc_physics_xform_interpolated`).
+- **Measure, don't guess:** static reasoning about the frame/phase ordering
+  went in circles for B4. A one-run in-game trace (`debug_motion_frames` in
+  fps_patch.ini → `M` lines in fps_patch.log) found the cause immediately.
+  Add a targeted diagnostic early when timing is unclear. Tell the user to
+  *edit* an existing INI key, never add a duplicate, because
+  GetPrivateProfileInt reads the first occurrence.
+- **Patch-write budget:** `PATCH_TRANSACTION_CAPACITY` (src/memory_patch.h)
+  limits how many static writes one install may make (raised from 32 to 64
+  on 2026-10-11, when 33 writes silently pushed the game back to 30 FPS).
+  layout_check only tests signature resolution, not the install step, so
+  check `Static patch writes installed=` in fps_patch.log after adding hooks.
+- Hard-coded client-frame counts that assumed 2 client frames per logic tick
+  (e.g. B4's `< 6` interpolation windows) must scale to `3 × R`.
 - TW and KW differ in some struct offsets (e.g. Object→AI is 0x2E8 in TW and
   0x2F4 in KW). Wildcard such bytes and always run layout_check on all four
   builds: one failing stage disables the whole patch.
