@@ -25,7 +25,9 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | B5 | No random small hitches; camera scrolling as smooth as unit movement | **Solved** with our DXVK build (G-Sync works borderless; confirmed 2026-10-11) |
 | B6 | Selected unit/building panel must never show the placeholder name "Unit name" | **Done** (fix 3, confirmed 2026-10-11) |
 | B3 | Particles should move smoothly at the render rate rather than in 30 Hz steps (e.g. by interpolation) | **Done**: CPU particles, bullets, trails, Shockwave, Ion Cannon ball and swarms (Scrin Buzzers) confirmed 2026-10-11. Smoke pop is vanilla behaviour (ignored) |
-| B7 | Fog of war / shroud should clear smoothly when units reveal it | Speed fixed (confirmed); round 2 (8-bit shroud texture) **needs in-game test** |
+| B7 | Fog of war / shroud should clear smoothly when units reveal it | **Done** (confirmed 2026-10-11). The shadow blink when the shroud covers an object again is vanilla behaviour (ignored) |
+| B8 | Secondary-object animations should not be sped up (e.g. Pitbull rocket pods' idle motion) | Investigating; needs a more precise description |
+| B9 | The white "selected" flash should last as long as at 30 FPS | Implemented, **needs in-game test** |
 | F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | Not started |
 
 ## Groundwork needed first
@@ -66,6 +68,15 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
   shades), so a fade shows a few coarse steps. That texture is now 8 bits per
   channel, filled at full precision. The second, 32-bit fog texture's
   instant cell writes are also ramped over ~66 ms.
+- **B9:** The flash is a colour "tint envelope" that steps once per drawn
+  frame (attack 1, sustain 1, decay 4 steps = 200 ms at 30 FPS, 67 ms at
+  90). Its colour steps are now scaled by 30/FPS and its hold time counts
+  30 Hz frames, so it lasts 200 ms again but fades smoothly. Repeated
+  flashes (a counted "flash N times") used a 15-frame interval; it's now
+  FPS/2 frames, i.e. 500 ms again.
+- **B8:** The Pitbull's pods are its turret (idle scan every 1–5 s). The
+  turret AI runs on the 15 Hz logic, so something client-side is suspected
+  (e.g. easing the drawn turret by a fixed fraction per frame). Not found yet.
 - **F1:** The main blocker is the 6-phase logic scheduler, which caps the
   client-to-logic ratio at 6 (90 FPS). FPS values that aren't multiples of 15,
   such as 144 and 160, also need fractional scheduling and more precise frame

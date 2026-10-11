@@ -143,6 +143,7 @@ static int check(const char *path) {
         { "tracers", resolve_tracer_sites },
         { "camera_ease", resolve_camera_ease_sites },
         { "shroud", resolve_shroud_sites },
+        { "tint_envelope", resolve_tint_envelope_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -203,6 +204,11 @@ static int check(const char *path) {
                    fade->fade_call.instruction, fade->fade_call.target,
                    fade->timestamp, rate, fade->step_cap);
         }
+        printf("  tint envelope update 0x%X, calls 0x%X 0x%X, flash interval 0x%X\n",
+               full.tint_envelope.update_function,
+               full.tint_envelope.update_calls[0].instruction,
+               full.tint_envelope.update_calls[1].instruction,
+               full.tint_envelope.flash_interval);
         printf("  shroud fog row copy call 0x%X -> 0x%X\n",
                full.shroud.fog_row_copy_call.instruction,
                full.shroud.fog_row_copy_call.target);

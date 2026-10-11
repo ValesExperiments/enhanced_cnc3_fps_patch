@@ -756,6 +756,59 @@ static u8 THISCALL tracer_update_scaled(void *tracer, u32 frame) {
 }
 
 /*
+ * Colour flashes (the white selection flash, and the general tint) are
+ * TintEnvelopes that Drawable::updateDrawable steps once per client frame:
+ * attack/decay add a per-step colour rate, sustain counts steps down. At
+ * 90 FPS the selection flash ran 3x too fast. During attack and decay the
+ * rates are scaled by 30/targetFPS for the call (their end tests compare
+ * against the rate lengths, so they still end within one smaller step), and
+ * the sustain countdown only advances when the 30 Hz frame does.
+ */
+typedef void(THISCALL *TintEnvelopeUpdateFn)(void *envelope);
+static TintEnvelopeUpdateFn g_original_tint_envelope_update;
+
+static BOOL retail_frame_advanced(void) {
+    void *game_client = *(void **)game_address(
+        g_game, g_game->drawable_physics.game_client_pointer);
+    u32 frame;
+
+    if (game_client == NULL) return TRUE;
+    frame = read_client_frame(game_client);
+    return frame == 0 || to_retail_visual_frame(frame) != to_retail_visual_frame(frame - 1u);
+}
+
+static void THISCALL update_tint_envelope_scaled(void *envelope) {
+    u8 *bytes = (u8 *)envelope;
+    float *rates = (float *)(bytes + TINT_ENVELOPE_RATES);
+    float saved[TINT_ENVELOPE_RATE_FLOATS];
+    float scale;
+    u32 i;
+
+    if (g_config->target_fps <= g_retail_visual_fps) {
+        g_original_tint_envelope_update(envelope);
+        return;
+    }
+    switch (bytes[TINT_ENVELOPE_STATE]) {
+    case TINT_ENVELOPE_SUSTAIN:
+        if (retail_frame_advanced()) g_original_tint_envelope_update(envelope);
+        return;
+    case TINT_ENVELOPE_ATTACK:
+    case TINT_ENVELOPE_DECAY:
+        scale = (float)g_retail_visual_fps / (float)g_config->target_fps;
+        for (i = 0; i < TINT_ENVELOPE_RATE_FLOATS; ++i) {
+            saved[i] = rates[i];
+            rates[i] *= scale;
+        }
+        g_original_tint_envelope_update(envelope);
+        memcpy(rates, saved, sizeof(saved));
+        return;
+    default:
+        g_original_tint_envelope_update(envelope);
+        return;
+    }
+}
+
+/*
  * Trails gain one point per 30 Hz step (the head particle's new position is
  * pushed onto the back of the trail), so their front grew in 30 Hz jumps.
  * While a trail system is drawn, its newest point is moved from the previous
@@ -1777,6 +1830,32 @@ static void install_tracer_motion(PatchInstaller *installer) {
                  &tracers->tracer_update_call, 0xE8, call_patch, sizeof(call_patch));
 }
 
+static void install_tint_envelope_timing(PatchInstaller *installer) {
+    static const char *const names[TINT_ENVELOPE_UPDATE_CALLS] = {
+        "tint envelope update branch 1", "tint envelope update branch 2"
+    };
+    const TintEnvelopeLayout *tint = &g_game->tint_envelope;
+    /* Repeated flashes every half second: retail 15 frames, now FPS / 2. */
+    u32 retail_interval = g_retail_visual_fps / 2u;
+    u32 interval = g_config->target_fps / 2u;
+    u32 i;
+
+    patch_bytes(installer, "repeated flash interval", tint->flash_interval,
+                &retail_interval, &interval, sizeof(interval));
+    g_original_tint_envelope_update =
+        (TintEnvelopeUpdateFn)game_address(g_game, tint->update_function);
+    for (i = 0; i < TINT_ENVELOPE_UPDATE_CALLS; ++i) {
+        /* One CALL and one tail JMP; keep each site's opcode. */
+        u8 opcode = *game_address(g_game, tint->update_calls[i].instruction);
+        u8 branch_patch[5] = { opcode, 0, 0, 0, 0 };
+        encode_rel32(&branch_patch[1],
+                     game_address(g_game, tint->update_calls[i].instruction + 5u),
+                     update_tint_envelope_scaled);
+        patch_branch(installer, names[i], &tint->update_calls[i], opcode, branch_patch,
+                     sizeof(branch_patch));
+    }
+}
+
 static void install_shroud_timing(PatchInstaller *installer) {
     static const char *const fade_names[SHROUD_TEXTURE_KINDS] = {
         "shroud texture fade call", "fog texture fade call"
@@ -2131,6 +2210,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_tracer_motion(&installer);
     install_camera_ease_timing(&installer);
     install_shroud_timing(&installer);
+    install_tint_envelope_timing(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);

@@ -1445,6 +1445,88 @@ static BOOL resolve_shroud_sites(
     return shroud->global_minimum_level <= 0x4000u;
 }
 
+/*
+ * TintEnvelope::update (TW 1.10 VA 0x474D1F): switch on the state byte
+ * (+0x38); sustain decrements its countdown (+0x34) once per call.
+ */
+static const u16 g_tint_envelope_update_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x0C, 0x53, 0x56, 0x8B, 0xF1,
+    0x0F, 0xBE, 0x46, 0x38, 0x83, 0xE8, 0x00, 0x57,
+    0x0F, 0x84, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x48, 0x0F, 0x84, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x48, 0x74, 0x20, 0x48, 0x0F, 0x85, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x46, 0x34, 0x85, 0xC0, 0x76, 0x09, 0x48, 0x89, 0x46, 0x34
+};
+
+/*
+ * Drawable::updateDrawable's repeated flash: GameClient frame (virtual +0x78)
+ * DIV [interval]; flash only on a zero remainder. Interval operand at +9.
+ */
+static const u16 g_flash_interval_pattern[] = {
+    0x8B, 0x01, 0xFF, 0x50, 0x78, 0x33, 0xD2,
+    0xF7, 0x35, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x85, 0xD2, 0x75, PATTERN_ANY, 0xFF, 0xB6
+};
+
+static BOOL resolve_tint_envelope_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    TintEnvelopeLayout *tint = &game->tint_envelope;
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u32 image_size = game->pe_size_of_image;
+    u16 initializer[12];
+    u32 client_fps = (u32)(uintptr_t)(module + game->timing.client_fps);
+    u32 interval;
+    u32 match;
+    u32 calls = 0;
+    u16 section_index;
+    u32 i;
+
+    if (!FIND_UNIQUE(module, nt, g_tint_envelope_update_pattern, &tint->update_function) ||
+        !FIND_UNIQUE(module, nt, g_flash_interval_pattern, &match) ||
+        !read_absolute_rva(module, image_size, match + 9u, &tint->flash_interval)) {
+        return FALSE;
+    }
+    /* Its only writer: MOV EAX,[client FPS]; SHR EAX,1; MOV [interval],EAX. */
+    interval = load_u32(module + match + 9u);
+    initializer[0] = 0xA1;
+    initializer[5] = 0xD1;
+    initializer[6] = 0xE8;
+    initializer[7] = 0xA3;
+    for (i = 0; i < 4; ++i) {
+        initializer[1 + i] = (u16)((client_fps >> (8u * i)) & 0xFFu);
+        initializer[8 + i] = (u16)((interval >> (8u * i)) & 0xFFu);
+    }
+    if (!FIND_UNIQUE(module, nt, initializer, &match)) return FALSE;
+    /*
+     * Exactly two direct branches, both from Drawable::updateDrawable's path:
+     * a CALL (+0x190 tint) and a tail JMP (+0x194 selection flash).
+     */
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections;
+         ++section_index, ++section) {
+        u32 start = section->VirtualAddress;
+        u32 size = section->Misc.VirtualSize;
+        u32 offset;
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
+            start >= image_size || size > image_size - start || size < 5u) {
+            continue;
+        }
+        for (offset = 0; offset <= size - 5u; ++offset) {
+            u8 opcode = module[start + offset];
+            u32 target;
+            if ((opcode != 0xE8 && opcode != 0xE9) ||
+                !decode_relative_target(module, image_size, start + offset, opcode, &target) ||
+                target != tint->update_function) {
+                continue;
+            }
+            if (calls >= TINT_ENVELOPE_UPDATE_CALLS) return FALSE;
+            tint->update_calls[calls].instruction = start + offset;
+            tint->update_calls[calls].target = target;
+            ++calls;
+        }
+    }
+    return calls == TINT_ENVELOPE_UPDATE_CALLS;
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -1604,6 +1686,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_tracer_sites(module, nt, &game) ||
         !resolve_camera_ease_sites(module, nt, &game) ||
         !resolve_shroud_sites(module, nt, &game) ||
+        !resolve_tint_envelope_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

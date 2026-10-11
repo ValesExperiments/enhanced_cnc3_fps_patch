@@ -642,6 +642,77 @@ Round 2 gives that texture 8 bits per channel:
 Walking a unit into fog/shroud reveals the area as a smooth wave at 90 FPS,
 with no visible steps; nothing else about the fog's look changes.
 
+**Confirmed 2026-10-11** ("the shroud looks good now").
+
+### Side finding: shadow blink when the shroud returns (vanilla, ignored)
+When the shroud re-covers an area, objects are swapped for frozen ghosts
+(`W3DGhostObject::snapShot`, TW 0x83B14F: copy each draw module's render
+object, remove the live one from the scene, add the copy; `freeSnapShot`
+0x8190CE and restore 0x80C503 undo it). Their shadow blinks for a frame or
+two during the swap. The user confirmed it also happens at 30 FPS without the
+DLL, so it's left alone.
+
+---
+
+## B9. Selection flash plays too fast
+
+**Status:** implemented 2026-10-11, needs an in-game test.
+
+### Root cause (TW 1.10 VAs; KW identical)
+The white "selected" flash is a `TintEnvelope` (0x50 bytes): `+0x04`
+attack rate, `+0x10` decay rate (RGB per step), `+0x1C` peak, `+0x28`
+current colour, `+0x34` sustain countdown, `+0x38` state (0 off, 1 attack,
+2 decay, 3 sustain), `+0x3C/+0x40` pulse (uses the logic frame, fine).
+- `play` (0x474C80): `rate = Δcolour / frames` (0x46F4F2 / 0x46F56C).
+- `Drawable` flash (0x478A33), default: white, attack 1, sustain 1, decay 4,
+  on `Drawable+0x194`. Other tints (0x478BA9: 30/30 frames) use `+0x194`;
+  `+0x190` is a second tint.
+- `update` (0x474D1F) does one step per call. It's reached once per **client
+  frame** from `Drawable_updateDrawable`: `CALL` at 0x48363E (`+0x190`) and
+  tail `JMP` at 0x478DF8 (end of 0x478BA9, `+0x194`). At 90 FPS every
+  flash/tint ran 3× faster.
+
+### Fix (implemented)
+Both branches are redirected to `update_tint_envelope_scaled`:
+- attack/decay: the six rate floats are scaled by 30/targetFPS for the
+  call and restored. The end tests compare against the rate lengths, so
+  phases still end within one (smaller) step.
+- sustain: the countdown only steps on client frames where the synthetic
+  30 Hz frame advances.
+Resolved by the update's body signature plus a scan for exactly two
+`E8`/`E9` branches to it; each site keeps its opcode.
+
+**Repeated flashes.** `Drawable_updateDrawable` also flashes a drawable
+again while its flash count (`+0x150`) is positive, whenever
+`GameClient::getFrame() % [0xBEAE48] == 0` (white, attack 1, decay 4). That
+interval is set once at startup to `client FPS / 2` = 15 frames (500 ms at
+30 FPS, 167 ms at 90). The patch sets it to `targetFPS / 2`, so the interval
+is 500 ms again. It's resolved from the `DIV` site and proved by its only
+writer (`MOV EAX,[client FPS]; SHR EAX,1; MOV [interval],EAX`).
+
+Verified on all four builds. Static writes are now 57.
+
+### Done when
+The selection flash looks the same length as at 30 FPS, but fades smoothly.
+
+---
+
+## B8. Secondary-object animations sped up
+
+**Status:** investigating.
+
+User report: "secondary objects" animate too fast, e.g. the **Pitbull's
+rocket pods** have an abnormally fast idle animation.
+- `GDIPitbull.xml`: the `TruckDraw` has no idle animation (`AnimationState`
+  is empty). The pods are the turret (`Turret TurretNameKey="Turret"`,
+  pitch bone `B_ Gun`) with `TurretTurnRate 2000`, `TurretPitchRate 200`
+  and idle scans every 1–5 s up to 90°. There is also a `SpotlightDraw`
+  (`RefreshTime 2.0s`, `SweepTime 1.0s`) on bone `B_SPOTLIGHT`.
+- The turret AI (`TurretAI`, idle/idle-scan/aim/recenter/hold states) is
+  logic (15 Hz). Suspect: client-side easing of the drawn turret toward the
+  logic angle by a fixed fraction per client frame, or a per-frame timer in
+  a secondary draw module. Needs a precise description of the motion.
+
 ---
 
 ## F1. Beyond 90 FPS (120 / 144 / 160+)

@@ -149,6 +149,14 @@ Fix or remove anything that turns out to be wrong.
   visibly at any FPS. Check texture formats (`FUN_0075609A(w, h, D3DFMT, …)`
   in TW) before chasing timing.
 - Unit names: Buzzers are **Scrin**, not Nod.
+- **Per-call stepping systems** (TintEnvelope colour flashes, etc.) are
+  called once per client frame from `Drawable_updateDrawable` (TW
+  0x48353F). Check its callees for other "one step per frame" systems.
+- **Check "is it vanilla?" first.** The user is happy to test without the DLL
+  at 30 FPS; the smoke pop and the shroud-return shadow blink both turned out
+  to be vanilla. Ask early when a symptom might be stock behaviour.
+- Branch scans: a function's callers can include tail `JMP`s (E9), not only
+  `CALL`s (E8). Ghidra reports both as calls.
 
 ## Lessons from tooling problems
 - A PyGhidra/JVM process does **not** exit when its MCP client disconnects,

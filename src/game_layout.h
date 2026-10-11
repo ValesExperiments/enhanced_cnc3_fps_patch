@@ -201,6 +201,25 @@ typedef struct ShroudLayout {
     u32 global_colour_scale[3];
 } ShroudLayout;
 
+enum { TINT_ENVELOPE_UPDATE_CALLS = 2 };
+
+typedef struct TintEnvelopeLayout {
+    /*
+     * TintEnvelope::update (attack/sustain/decay colour flash, one step per
+     * call) and its two calls, both once per client frame from
+     * Drawable::updateDrawable: the Drawable +0x190 tint and the +0x194
+     * selection flash.
+     */
+    u32 update_function;
+    BranchSite update_calls[TINT_ENVELOPE_UPDATE_CALLS];
+    /*
+     * Repeated-flash interval: Drawable::updateDrawable flashes again while
+     * its flash count (+0x150) > 0 whenever "client frame % interval == 0".
+     * The interval global is set once at startup to client FPS / 2 (15).
+     */
+    u32 flash_interval;
+} TintEnvelopeLayout;
+
 typedef struct SelectionPanelLayout {
     /*
      * TacticalSelectionDetailsPanelImpl::SetUnitName (forwards only changed
@@ -267,6 +286,7 @@ typedef struct GameLayout {
     TracerLayout tracers;
     CameraEaseLayout camera_ease;
     ShroudLayout shroud;
+    TintEnvelopeLayout tint_envelope;
 } GameLayout;
 
 typedef enum GameResolveResult {
@@ -358,6 +378,18 @@ enum {
     SHROUD_TEXTURE_HEIGHT = 0x24,
     SHROUD_TARGET_LEVELS = 0x38,
     SHROUD_SHOWN_LEVELS = 0x3C,
+
+    /*
+     * TintEnvelope: attack rate (+0x04) and decay rate (+0x10) colour steps
+     * per update, sustain countdown (+0x34), state (+0x38: 0 off, 1 attack,
+     * 2 decay, 3 sustain).
+     */
+    TINT_ENVELOPE_RATES = 0x04,
+    TINT_ENVELOPE_RATE_FLOATS = 6,
+    TINT_ENVELOPE_STATE = 0x38,
+    TINT_ENVELOPE_ATTACK = 1,
+    TINT_ENVELOPE_DECAY = 2,
+    TINT_ENVELOPE_SUSTAIN = 3,
 
     /* SingleUnitModeHandler -> SelectionDetails::PanelImpl -> panel gadget. */
     SELECTION_HANDLER_PANEL = 0x14,
