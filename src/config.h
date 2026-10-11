@@ -13,6 +13,8 @@ typedef struct Config {
     u32 debug_motion_frames;
     /* Diagnostic: client frames of frame-pacing data to log (0 = off). */
     u32 debug_frame_times;
+    /* Lower the client rate while the PC can't hold it (keeps 100% game speed). */
+    BOOL adaptive_fps;
     /* Diagnostic: trail-system draws to log (0 = off). */
     u32 debug_trail_draws;
 } Config;

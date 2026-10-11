@@ -149,6 +149,16 @@ Fix or remove anything that turns out to be wrong.
   visibly at any FPS. Check texture formats (`FUN_0075609A(w, h, D3DFMT, …)`
   in TW) before chasing timing.
 - Unit names: Buzzers are **Scrin**, not Nod.
+- **Adaptive pacing (F2): never use `g_config->target_fps` for per-frame
+  conversions.** Use `g_rate` (the live effective rate). Anything computed
+  once from the rate must also be rewritten in `retime_client_rate`, and
+  absolute `frame × 30 / rate` mappings must be running counters (see
+  `sync_retail_frame`). Frame "work" seen by the CPU includes waiting in
+  Present only when the GPU is the bottleneck, so it can't show GPU headroom:
+  remember failed rises as a ceiling and probe gently (monitor round 3).
+  `g_config->target_fps <= 30` stays only as the
+  "patch active" guard. The game's integer rate globals must never go below
+  15 (stock code divides by `clientFPS/15`).
 - **Replacing a leaf function via a JMP at its entry is not ABI-safe.**
   MSVC callers may keep "volatile" registers (ECX, EDX, EAX, XMM) live across
   calls to leaves that don't touch them (e.g. GameEngine_update relies on

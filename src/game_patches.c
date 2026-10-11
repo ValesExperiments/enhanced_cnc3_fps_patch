@@ -22,6 +22,15 @@ static float g_camera_shake_decay;
 static u32 g_retail_visual_fps = 30u;
 /* Fractional-rate state is reset whenever a game session starts. */
 static u32 g_particle_update_accumulator;
+/*
+ * Effective client rate. Everything rate-dependent uses this instead of the
+ * configured target: it equals target_fps unless adaptive pacing lowered it
+ * because the PC could not hold the target (see the pacing monitor).
+ */
+static u32 g_rate = 30u;
+static u32 g_rate_pending = 30u;
+static void monitor_frame_pacing(u32 interval_ms);
+static void apply_live_camera_settings(void);
 /* Elapsed fraction of the current 30 Hz particle step; frozen while paused. */
 static float g_particle_blend_fraction;
 /* Number of 30 Hz CPU particle simulation steps run so far. */
@@ -203,8 +212,16 @@ static u32 g_tick_frame;       /* j, 1..F */
 static u32 g_tick_accumulator; /* Bresenham remainder in fifteenths */
 
 static BOOL high_rate_schedule(void) {
-    return g_config->target_fps > LOGIC_FPS * LOGIC_PHASE_COUNT;
+    return g_rate > LOGIC_FPS * LOGIC_PHASE_COUNT;
 }
+
+/* Whole client frames per logic tick; below 15 FPS a frame runs whole ticks. */
+static u32 client_frames_per_tick(void) {
+    u32 ratio = g_rate / LOGIC_FPS;
+    return ratio != 0u ? ratio : 1u;
+}
+
+static void apply_pending_rate(void);
 
 static u32 scheduled_phases_done(u32 frame, u32 frames) {
     if (frame <= 1u) return 1u;
@@ -225,19 +242,53 @@ static BOOL logic_tick_running(void) {
            game_client[g_game->particle_draw.client_simulates_offset] != 0;
 }
 
+/*
+ * Below 15 FPS (adaptive pacing) one logic tick per frame is not enough. The
+ * game's own schedule runs one whole tick per frame (its rate global stays
+ * at 15); after that tick, more whole ticks are dispatched so ticks average
+ * 15 per second of frames (Bresenham: 10 FPS gives 1, 2, 1, 2...). A network
+ * stall ends the burst; at most four extra ticks run per frame.
+ */
+enum { MAX_CATCH_UP_TICKS = 4 };
+static u32 g_catch_up_accumulator;
+
+static void run_catch_up_ticks(u8 *engine) {
+    u32 ticks;
+    u32 i;
+
+    g_catch_up_accumulator += LOGIC_FPS;
+    ticks = g_catch_up_accumulator / g_rate;
+    g_catch_up_accumulator %= g_rate;
+    /* The frame's own tick has already run. */
+    for (i = 1; i < ticks && i <= MAX_CATCH_UP_TICKS; ++i) {
+        *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) = 1u;
+        g_original_dispatch_logic_phase(engine, 1u);
+        if (!logic_tick_running()) {
+            /* Stalled: the next frame wraps and retries the tick. */
+            *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) = LOGIC_PHASE_COUNT;
+            break;
+        }
+    }
+}
+
 static void THISCALL dispatch_logic_phase_scheduled(void *engine_pointer, u32 phase) {
     u8 *engine = (u8 *)engine_pointer;
     u32 next;
 
+    /* A new logic tick is the only safe point to change the client rate. */
+    if (phase == 1u) apply_pending_rate();
     if (!high_rate_schedule()) {
         g_original_dispatch_logic_phase(engine_pointer, phase);
+        if (phase == 1u && g_rate < LOGIC_FPS && logic_tick_running()) {
+            run_catch_up_ticks(engine);
+        }
         return;
     }
     if (phase == 1u) {
         g_original_dispatch_logic_phase(engine_pointer, phase);
         /* A network stall clears the GameClient flag; the engine then reverts. */
         if (logic_tick_running()) {
-            g_tick_accumulator += g_config->target_fps;
+            g_tick_accumulator += g_rate;
             g_tick_frames = g_tick_accumulator / LOGIC_FPS;
             g_tick_accumulator %= LOGIC_FPS;
             g_tick_frame = 1u;
@@ -268,7 +319,7 @@ static void THISCALL dispatch_logic_phase_scheduled(void *engine_pointer, u32 ph
  */
 static void THISCALL update_phase_interpolation(void *engine_pointer) {
     u8 *engine = (u8 *)engine_pointer;
-    u32 ratio = g_config->target_fps / LOGIC_FPS;
+    u32 ratio = client_frames_per_tick();
     u32 phase = *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE);
     u32 client_slot = (ratio * phase + LOGIC_PHASE_COUNT - 1u) / LOGIC_PHASE_COUNT;
     float interpolation;
@@ -328,7 +379,7 @@ __attribute__((naked)) static void update_phase_interpolation_entry(void) {
  * Object-to-Drawable updates once after the final phase in each client slice.
  */
 static BOOL STDCALL is_client_slice_end(u32 phase) {
-    u32 ratio = g_config->target_fps / LOGIC_FPS;
+    u32 ratio = client_frames_per_tick();
     u32 client_slot;
     u32 end_phase;
 
@@ -359,13 +410,12 @@ static u32 STDCALL advance_w3d_time(u32 client_frame_delta) {
     /* Fixed-point accumulator: numerator units are W3D-ms * targetFPS. */
     scaled = g_w3d_time_remainder +
              client_frame_delta * W3D_RETAIL_MILLISECONDS_PER_SECOND;
-    elapsed = scaled / g_config->target_fps;
-    g_w3d_time_remainder = scaled % g_config->target_fps;
+    elapsed = scaled / g_rate;
+    g_w3d_time_remainder = scaled % g_rate;
     current += elapsed;
     *accumulated = current;
     /* Publish the next quotient so direct step readers share the same long-term rate. */
-    *live_step = (g_w3d_time_remainder + W3D_RETAIL_MILLISECONDS_PER_SECOND) /
-                 g_config->target_fps;
+    *live_step = (g_w3d_time_remainder + W3D_RETAIL_MILLISECONDS_PER_SECOND) / g_rate;
     return current;
 }
 
@@ -382,16 +432,55 @@ static u32 read_client_frame(void *game_client) {
     return get_frame_number(game_client);
 }
 
-static u32 to_retail_visual_frame(u32 actual_frame) {
-    u32 target_fps = g_config->target_fps;
-    return (actual_frame / target_fps) * g_retail_visual_fps +
-           ((actual_frame % target_fps) * g_retail_visual_fps + target_fps - 1u) /
-               target_fps;
+/*
+ * The synthetic 30 Hz frame is kept as a running count (whole 30 Hz frames
+ * plus a remainder in 1/rate units) advanced by each new client frame, so it
+ * stays continuous when the effective rate changes. Its value is
+ * ceil(elapsed * 30): it advances on the first client frame of each 30 Hz
+ * interval, like the original ceil(frame * 30 / target).
+ */
+static BOOL g_retail_started;
+static u32 g_retail_client_frame;
+static u32 g_retail_whole;
+static u32 g_retail_remainder;
+static BOOL g_retail_advanced;
+
+static u32 retail_frame_value(void) {
+    return g_retail_whole + (g_retail_remainder != 0u ? 1u : 0u);
+}
+
+static void sync_retail_frame(u32 client_frame) {
+    u32 delta = client_frame - g_retail_client_frame;
+    u32 before;
+    u64 total;
+
+    if (g_retail_started && delta == 0u) return;
+    if (!g_retail_started || delta > 0x10000u) {
+        total = (u64)client_frame * g_retail_visual_fps;
+        g_retail_whole = (u32)(total / g_rate);
+        g_retail_remainder = (u32)(total % g_rate);
+        g_retail_client_frame = client_frame;
+        g_retail_started = TRUE;
+        g_retail_advanced = TRUE;
+        return;
+    }
+    before = retail_frame_value();
+    total = (u64)g_retail_remainder + (u64)delta * g_retail_visual_fps;
+    g_retail_whole += (u32)(total / g_rate);
+    g_retail_remainder = (u32)(total % g_rate);
+    g_retail_client_frame = client_frame;
+    g_retail_advanced = retail_frame_value() != before;
+}
+
+/* Position within the current 30 Hz interval, (0, 1]. */
+static float retail_frame_fraction(void) {
+    return g_retail_remainder == 0u ? 1.0f : (float)g_retail_remainder / (float)g_rate;
 }
 
 static u32 THISCALL get_retail_visual_frame(void *game_client) {
     if (game_client == NULL || g_config->target_fps < g_retail_visual_fps) return 0;
-    return to_retail_visual_frame(read_client_frame(game_client));
+    sync_retail_frame(read_client_frame(game_client));
+    return retail_frame_value();
 }
 
 /*
@@ -523,17 +612,16 @@ static u8 THISCALL calc_physics_xform_interpolated(void *drawable, float *info) 
     void *game_client = *(void **)game_address(
         g_game, g_game->drawable_physics.game_client_pointer);
     PhysicsXformCacheEntry *entry;
-    u32 target_fps = g_config->target_fps;
     u32 actual_frame;
     u32 retail_frame;
-    u32 remainder;
     float alpha;
     u32 i;
 
     if (game_client == NULL) return g_original_calc_physics_xform(drawable, info);
     actual_frame = read_client_frame(game_client);
     log_motion_sample(drawable, actual_frame);
-    retail_frame = to_retail_visual_frame(actual_frame);
+    sync_retail_frame(actual_frame);
+    retail_frame = retail_frame_value();
     entry = find_physics_entry(drawable, retail_frame);
     if (entry == NULL) return g_original_calc_physics_xform(drawable, info);
 
@@ -555,8 +643,7 @@ static u8 THISCALL calc_physics_xform_interpolated(void *drawable, float *info) 
      * Retail time t = actual * 30 / target lies in (retail_frame - 1, retail_frame].
      * Blend previous -> current by t's position in that interval.
      */
-    remainder = (u32)(((u64)actual_frame * g_retail_visual_fps) % target_fps);
-    alpha = remainder == 0u ? 1.0f : (float)remainder / (float)target_fps;
+    alpha = retail_frame_fraction();
     for (i = 0; i < PHYSICS_XFORM_FLOATS; ++i) {
         info[i] = entry->previous[i] + (entry->current[i] - entry->previous[i]) * alpha;
     }
@@ -669,20 +756,22 @@ static BOOL particles_simulate(void) {
 
 static void THISCALL update_particles_at_retail_rate(void *manager) {
     SubsystemUpdateFn update;
-    u32 target_fps = g_config->target_fps;
 
     if (manager == NULL) return;
     advance_minimap_glide();
     update = (SubsystemUpdateFn)game_address(
         g_game, g_game->visual.particle_simulation.target);
-    if (target_fps <= g_retail_visual_fps) {
+    if (g_config->target_fps <= g_retail_visual_fps) {
         update(manager);
         return;
     }
-    /* Bresenham-style rate conversion: exactly 30 calls per targetFPS frames. */
+    /*
+     * Bresenham-style rate conversion: exactly 30 calls per second of client
+     * frames. Below 30 FPS (adaptive pacing) a frame runs more than one.
+     */
     g_particle_update_accumulator += g_retail_visual_fps;
-    if (g_particle_update_accumulator >= target_fps) {
-        g_particle_update_accumulator -= target_fps;
+    while (g_particle_update_accumulator >= g_rate) {
+        g_particle_update_accumulator -= g_rate;
         ++g_particle_sim_tick;
         update(manager);
     }
@@ -691,7 +780,7 @@ static void THISCALL update_particles_at_retail_rate(void *manager) {
      * keeps the last fraction; a cycling one made particles oscillate.
      */
     if (particles_simulate()) {
-        g_particle_blend_fraction = (float)g_particle_update_accumulator / (float)target_fps;
+        g_particle_blend_fraction = (float)g_particle_update_accumulator / (float)g_rate;
     }
 }
 
@@ -990,7 +1079,7 @@ static u8 THISCALL tracer_update_scaled(void *tracer, u32 frame) {
     float retail_speed = *speed;
     u8 result;
 
-    *speed = retail_speed * (float)g_retail_visual_fps / (float)g_config->target_fps;
+    *speed = retail_speed * (float)g_retail_visual_fps / (float)g_rate;
     result = g_original_tracer_update(tracer, frame);
     *speed = retail_speed;
     return result;
@@ -1015,7 +1104,8 @@ static BOOL retail_frame_advanced(void) {
 
     if (game_client == NULL) return TRUE;
     frame = read_client_frame(game_client);
-    return frame == 0 || to_retail_visual_frame(frame) != to_retail_visual_frame(frame - 1u);
+    sync_retail_frame(frame);
+    return g_retail_advanced;
 }
 
 static void THISCALL update_tint_envelope_scaled(void *envelope) {
@@ -1035,7 +1125,7 @@ static void THISCALL update_tint_envelope_scaled(void *envelope) {
         return;
     case TINT_ENVELOPE_ATTACK:
     case TINT_ENVELOPE_DECAY:
-        scale = (float)g_retail_visual_fps / (float)g_config->target_fps;
+        scale = (float)g_retail_visual_fps / (float)g_rate;
         for (i = 0; i < TINT_ENVELOPE_RATE_FLOATS; ++i) {
             saved[i] = rates[i];
             rates[i] *= scale;
@@ -1743,8 +1833,7 @@ static u32 STDCALL get_retail_limiter_interval(void *engine_pointer) {
      * multiplier is the truncated ratio we set; adaptive pacing (multiplayer)
      * may lower it, and then it is used as is. Integer ratios are unchanged.
      */
-    divisor = multiplier == g_config->target_fps / LOGIC_FPS ? g_config->target_fps
-                                                             : multiplier * LOGIC_FPS;
+    divisor = multiplier == client_frames_per_tick() ? g_rate : multiplier * LOGIC_FPS;
     if (g_limiter_interval_divisor != divisor) {
         if (g_limiter_interval_divisor == 0u) {
             g_limiter_interval_remainder = 0u;
@@ -1763,6 +1852,7 @@ static u32 STDCALL get_retail_limiter_interval(void *engine_pointer) {
     g_limiter_interval_remainder = scaled % divisor;
     if (interval == 0u) interval = 1u;
     log_frame_time_sample((u8 *)engine_pointer, interval, multiplier);
+    monitor_frame_pacing(interval);
     return interval;
 }
 
@@ -1774,17 +1864,19 @@ static u32 STDCALL get_retail_limiter_interval(void *engine_pointer) {
  * span, so authored millisecond delays still advance by the correct amount.
  */
 static u8 THISCALL update_audio_at_retail_rate(void *audio_manager) {
-    u32 target_fps;
+    u8 result = 0;
 
     if (g_original_audio_update == NULL) return 0;
     if (g_config == NULL || g_config->target_fps <= g_retail_visual_fps) {
         return g_original_audio_update(audio_manager);
     }
-    target_fps = g_config->target_fps;
+    /* Below 30 FPS (adaptive pacing) a frame services audio more than once. */
     g_audio_update_accumulator += g_retail_visual_fps;
-    if (g_audio_update_accumulator < target_fps) return 0;
-    g_audio_update_accumulator -= target_fps;
-    return g_original_audio_update(audio_manager);
+    while (g_audio_update_accumulator >= g_rate) {
+        g_audio_update_accumulator -= g_rate;
+        result = g_original_audio_update(audio_manager);
+    }
+    return result;
 }
 
 /*
@@ -2280,6 +2372,18 @@ static void install_frame_authored_effects(PatchInstaller *installer) {
  */
 static float g_camera_ease_limits[2];
 static float g_camera_ease_accels[2];
+static float g_camera_ease_retail_limits[2];
+static float g_camera_ease_retail_accels[2];
+
+static void retime_camera_ease(void) {
+    float dt = (float)g_retail_visual_fps / (float)g_rate;
+    u32 i;
+
+    for (i = 0; i < 2; ++i) {
+        g_camera_ease_limits[i] = g_camera_ease_retail_limits[i] * dt;
+        g_camera_ease_accels[i] = g_camera_ease_retail_accels[i] * dt * dt;
+    }
+}
 
 static void install_camera_ease_timing(PatchInstaller *installer) {
     static const char *const limit_names[2] = {
@@ -2289,7 +2393,6 @@ static void install_camera_ease_timing(PatchInstaller *installer) {
         "camera ease phase A acceleration operand", "camera ease phase B acceleration operand"
     };
     const CameraEaseLayout *ease = &g_game->camera_ease;
-    float dt = (float)g_retail_visual_fps / (float)g_config->target_fps;
     u32 i;
 
     for (i = 0; i < 2; ++i) {
@@ -2297,8 +2400,9 @@ static void install_camera_ease_timing(PatchInstaller *installer) {
             game_address(g_game, ease->limit_operands[i]));
         float *retail_accel = (float *)(uintptr_t)load_u32(
             game_address(g_game, ease->accel_operands[i]));
-        g_camera_ease_limits[i] = *retail_limit * dt;
-        g_camera_ease_accels[i] = *retail_accel * dt * dt;
+        g_camera_ease_retail_limits[i] = *retail_limit;
+        g_camera_ease_retail_accels[i] = *retail_accel;
+        retime_camera_ease();
         patch_pointer(installer, limit_names[i], ease->limit_operands[i],
                       retail_limit, &g_camera_ease_limits[i]);
         patch_pointer(installer, accel_names[i], ease->accel_operands[i],
@@ -2481,6 +2585,284 @@ static void install_shroud_timing(PatchInstaller *installer) {
     }
     patch_bytes(installer, "shroud texture format", shroud->shroud_format_immediate,
                 &retail_format, &precise_format, sizeof(precise_format));
+}
+
+/*
+ * Adaptive client rate. The patch ties game speed to frame counts (frames per
+ * logic tick, particle/audio steps per frame, W3D milliseconds per frame...),
+ * so if the PC cannot hold the configured rate, the whole game slowed down.
+ * The pacing monitor takes each frame's own work (time since the limiter's
+ * previous wait ended) over ~0.25 s, trims hitches, and picks the highest
+ * rate the PC can sustain (down to 5 FPS). It drops when the work overruns
+ * the budget by 10% and rises after half a second of headroom. The change is
+ * applied at the start of a logic tick and every rate-dependent value is
+ * re-timed, so logic stays at 15 Hz and visuals keep real-time speed.
+ */
+enum {
+    MIN_ADAPTIVE_FPS = 5,
+    RATE_RAISE_MS = 500,          /* headroom needed this long before rising */
+    PACING_SETTLE_MS = 300,       /* frames ignored after a switch (queues drain) */
+    FAILED_RAISE_MS = 3000,       /* a drop this soon after a rise: the rise failed */
+    CEILING_RETRY_MS = 10000,     /* first retry above a failed rate */
+    CEILING_RETRY_MAX_MS = 60000,
+    PACING_STABLE_MS = 60000,     /* this long without failures resets the retry */
+    PACING_WINDOW_MAX = 64,
+    PACING_WINDOW_MIN = 8,
+    PACING_SKIP_MS = 250
+};
+
+/* Recent frames' work in milliseconds (ring buffer). */
+static u32 g_pacing_samples[PACING_WINDOW_MAX];
+static u32 g_pacing_sample_next;
+static u32 g_pacing_sample_count;
+static u32 g_pacing_headroom_frames;
+static u32 g_pacing_settle_frames;
+static u32 g_pacing_frames_since_raise;
+static u32 g_pacing_rate_before_raise;
+/* Rate a rise could not hold: stay at or below it until the retry is due. */
+static u32 g_pacing_ceiling;
+static u32 g_pacing_ceiling_frames;
+static u32 g_pacing_retry_ms = CEILING_RETRY_MS;
+
+static void clear_pacing_window(void) {
+    g_pacing_sample_next = 0;
+    g_pacing_sample_count = 0;
+}
+
+static void reset_pacing_monitor(void) {
+    clear_pacing_window();
+    g_pacing_headroom_frames = 0;
+    g_pacing_settle_frames = 0;
+    g_pacing_frames_since_raise = 0x40000000u;
+    g_pacing_rate_before_raise = 0;
+    g_pacing_ceiling = 0;
+    g_pacing_ceiling_frames = 0;
+    g_pacing_retry_ms = CEILING_RETRY_MS;
+}
+
+static u32 frames_for_ms(u32 ms, u32 rate) {
+    return (u32)((u64)ms * rate / 1000u);
+}
+
+static void switch_pacing_rate(u32 rate) {
+    g_rate_pending = rate;
+    g_pacing_headroom_frames = 0;
+    clear_pacing_window();
+    g_pacing_settle_frames = frames_for_ms(PACING_SETTLE_MS, rate);
+    if (g_pacing_settle_frames < 4u) g_pacing_settle_frames = 4u;
+}
+
+/* Highest supported rate not above `fps`. */
+static u32 supported_rate_at_most(double fps) {
+    u32 target = g_config->target_fps;
+    u32 rate;
+
+    if (fps >= (double)target) return target;
+    /* Above 90 any rate; 15..90 multiples of 15; below 15 any whole number. */
+    if (fps > LOGIC_FPS * LOGIC_PHASE_COUNT) {
+        rate = (u32)fps;
+    } else if (fps >= LOGIC_FPS) {
+        rate = (u32)(fps / LOGIC_FPS) * LOGIC_FPS;
+    } else {
+        rate = (u32)fps;
+    }
+    if (rate < MIN_ADAPTIVE_FPS) rate = MIN_ADAPTIVE_FPS;
+    if (rate > target) rate = target;
+    return rate;
+}
+
+/* Mean of the middle 60% of the last `count` samples (hitch-proof). */
+static double trimmed_pacing_mean(u32 count) {
+    u32 sorted[PACING_WINDOW_MAX];
+    u32 i;
+    u32 j;
+    u32 first;
+    u32 last;
+    u32 sum = 0;
+
+    for (i = 0; i < count; ++i) {
+        u32 value = g_pacing_samples[(g_pacing_sample_next + PACING_WINDOW_MAX - 1u - i) %
+                                     PACING_WINDOW_MAX];
+        for (j = i; j > 0u && sorted[j - 1u] > value; --j) sorted[j] = sorted[j - 1u];
+        sorted[j] = value;
+    }
+    first = count / 5u;
+    last = count - count / 5u;
+    for (i = first; i < last; ++i) sum += sorted[i];
+    return (double)sum / (double)(last - first);
+}
+
+/*
+ * Called once per limited frame, right before the limiter waits. The work of
+ * this frame is the time since the stock stamp of the previous wait's end,
+ * exactly what the limiter itself compares with the interval.
+ */
+static void monitor_frame_pacing(u32 interval_ms) {
+    u32 stamp = *(volatile u32 *)game_address(g_game, g_game->pacing.previous_frame_time_ms);
+    u32 work_ms = (u32)timeGetTime() - stamp;
+    u32 window;
+    double work;
+    double capacity;
+    u32 sustainable;
+    u32 headroom_rate;
+
+    (void)interval_ms;
+    if (!g_config->adaptive_fps || g_config->target_fps <= g_retail_visual_fps) return;
+    /* Loading stalls say nothing about the frame rate the game can hold. */
+    if (work_ms > PACING_SKIP_MS) return;
+    /* After a switch, let queued frames drain before judging again. */
+    if (g_pacing_settle_frames != 0u) {
+        --g_pacing_settle_frames;
+        return;
+    }
+    if (g_pacing_ceiling_frames != 0u && --g_pacing_ceiling_frames == 0u) {
+        /* Probe gently above the failed rate: 15% (at least one step) per retry. */
+        u32 next = supported_rate_at_most((double)g_pacing_ceiling * 1.15);
+        if (next <= g_pacing_ceiling) next = supported_rate_at_most((double)g_pacing_ceiling + LOGIC_FPS);
+        if (next >= g_config->target_fps) {
+            g_pacing_ceiling = 0;
+        } else {
+            g_pacing_ceiling = next;
+            g_pacing_ceiling_frames = frames_for_ms(g_pacing_retry_ms, next);
+        }
+    }
+    g_pacing_samples[g_pacing_sample_next] = work_ms;
+    g_pacing_sample_next = (g_pacing_sample_next + 1u) % PACING_WINDOW_MAX;
+    if (g_pacing_sample_count < PACING_WINDOW_MAX) ++g_pacing_sample_count;
+    ++g_pacing_frames_since_raise;
+
+    /* About a quarter of a second of frames. */
+    window = g_rate / 4u;
+    if (window < PACING_WINDOW_MIN) window = PACING_WINDOW_MIN;
+    if (window > PACING_WINDOW_MAX) window = PACING_WINDOW_MAX;
+    if (g_pacing_sample_count < window) return;
+    work = trimmed_pacing_mean(window);
+    capacity = 1000.0 / (work > 0.5 ? work : 0.5);
+
+    /*
+     * Drop only when the work clearly overruns this rate's frame budget; an
+     * external cap at the same rate makes the work fill the budget exactly.
+     */
+    if (work > 1.10 * 1000.0 / (double)g_rate) {
+        sustainable = supported_rate_at_most(capacity * 0.95);
+        if (sustainable < g_rate) {
+            if (g_pacing_frames_since_raise < frames_for_ms(FAILED_RAISE_MS, g_rate) &&
+                g_pacing_rate_before_raise != 0u && g_pacing_rate_before_raise < g_rate) {
+                /*
+                 * The last rise could not hold (e.g. the GPU, not the CPU, is
+                 * the limit, which the CPU-side work only shows at that rate).
+                 * Go back to the rate that held and stay at or below it.
+                 */
+                g_pacing_ceiling = g_pacing_rate_before_raise > sustainable
+                                       ? g_pacing_rate_before_raise : sustainable;
+                g_pacing_ceiling_frames = frames_for_ms(g_pacing_retry_ms, g_pacing_ceiling);
+                if (g_pacing_retry_ms < CEILING_RETRY_MAX_MS) g_pacing_retry_ms *= 2u;
+                if (sustainable < g_pacing_ceiling) sustainable = g_pacing_ceiling;
+                g_pacing_rate_before_raise = 0;
+            }
+            log_printf("Adaptive pacing: frame work %.2f ms over the %u FPS budget; drop to %u",
+                       work, g_rate, sustainable);
+            switch_pacing_rate(sustainable);
+            return;
+        }
+    }
+    headroom_rate = supported_rate_at_most(capacity * 0.90);
+    if (g_pacing_ceiling != 0u && headroom_rate > g_pacing_ceiling) {
+        headroom_rate = supported_rate_at_most((double)g_pacing_ceiling);
+    }
+    if (headroom_rate > g_rate) {
+        if (++g_pacing_headroom_frames >= frames_for_ms(RATE_RAISE_MS, g_rate)) {
+            log_printf("Adaptive pacing: frame work %.2f ms leaves headroom; raise %u to %u",
+                       work, g_rate, headroom_rate);
+            g_pacing_rate_before_raise = g_rate;
+            g_pacing_frames_since_raise = 0;
+            switch_pacing_rate(headroom_rate);
+        }
+    } else {
+        g_pacing_headroom_frames = 0;
+        /* Long stable stretches forget earlier failed rises. */
+        if (g_pacing_frames_since_raise > frames_for_ms(PACING_STABLE_MS, g_rate)) {
+            g_pacing_retry_ms = CEILING_RETRY_MS;
+        }
+    }
+}
+
+/* Rescale a fixed-point remainder (units of 1/old) to units of 1/new. */
+static u32 rescale_remainder(u32 remainder, u32 old_rate, u32 new_rate, BOOL keep_nonzero) {
+    u32 scaled;
+
+    if (old_rate == 0u) return 0u;
+    scaled = (u32)((u64)remainder * new_rate / old_rate);
+    if (scaled >= new_rate) scaled = new_rate - 1u;
+    if (keep_nonzero && remainder != 0u && scaled == 0u) scaled = 1u;
+    return scaled;
+}
+
+static void write_code_byte(u32 rva, u8 value) {
+    u8 *address = game_address(g_game, rva);
+    DWORD old_protect;
+
+    if (*address == value) return;
+    if (!VirtualProtect(address, 1, PAGE_EXECUTE_READWRITE, &old_protect)) return;
+    *address = value;
+    VirtualProtect(address, 1, old_protect, &old_protect);
+    FlushInstructionCache(GetCurrentProcess(), address, 1);
+}
+
+/* Re-time every value derived from the client rate. */
+static void retime_client_rate(u32 rate) {
+    const TimingLayout *timing = &g_game->timing;
+    u8 *engine = *(u8 **)game_address(g_game, timing->game_engine_pointer);
+    u8 *global_data = *(u8 **)game_address(g_game, timing->global_data_pointer);
+    u32 old_rate = g_rate;
+    u32 game_rate = rate < LOGIC_FPS ? LOGIC_FPS : rate;
+    u8 window = (u8)(3u * ((rate + LOGIC_FPS - 1u) / LOGIC_FPS));
+    u32 i;
+
+    g_particle_update_accumulator =
+        rescale_remainder(g_particle_update_accumulator, old_rate, rate, FALSE);
+    g_audio_update_accumulator =
+        rescale_remainder(g_audio_update_accumulator, old_rate, rate, FALSE);
+    g_w3d_time_remainder = rescale_remainder(g_w3d_time_remainder, old_rate, rate, FALSE);
+    g_retail_remainder = rescale_remainder(g_retail_remainder, old_rate, rate, TRUE);
+    g_rate = rate;
+    g_rate_pending = rate;
+
+    select_camera_rate_constants(rate);
+    g_visual_client_step = 1.0f / (float)rate;
+    g_client_frames_per_millisecond = (float)rate / 1000.0f;
+    retime_camera_ease();
+    *(u32 *)game_address(g_game, g_game->tint_envelope.flash_interval) =
+        rate / 2u > 0u ? rate / 2u : 1u;
+    for (i = 0; i < 2; ++i) {
+        write_code_byte(g_game->drawable_interpolation.window_immediates[i], window);
+    }
+
+    /*
+     * The game's own rate globals, as written at session start. Stock code
+     * divides by clientFPS / 15, so its frame rate never goes below 15; the
+     * per-frame time steps use the true rate.
+     */
+    *(u32 *)game_address(g_game, timing->client_fps) = game_rate;
+    *(float *)game_address(g_game, timing->client_fps_float) = (float)game_rate;
+    *(float *)game_address(g_game, timing->audio_milliseconds_per_frame) =
+        1000.0f / (float)rate;
+    *(float *)game_address(g_game, timing->visual_seconds_per_frame) = 1.0f / (float)rate;
+    *(u32 *)game_address(g_game, timing->w3d_milliseconds_per_frame) =
+        (g_w3d_time_remainder + W3D_RETAIL_MILLISECONDS_PER_SECOND) / rate;
+    if (global_data != NULL) *(u32 *)(global_data + GLOBAL_DATA_FPS_LIMIT) = game_rate;
+    if (engine != NULL) {
+        *(u32 *)(engine + ENGINE_MAX_UPDATE_FPS) = game_rate;
+        *(u32 *)(engine + ENGINE_NOMINAL_CLIENT_FRAMES_PER_LOGIC_TICK) = game_rate / LOGIC_FPS;
+        *(u32 *)(engine + ENGINE_PACING_UPDATE_MULTIPLIER) = game_rate / LOGIC_FPS;
+    }
+}
+
+static void apply_pending_rate(void) {
+    if (g_rate_pending == g_rate) return;
+    log_u32("Adaptive pacing: effective client FPS=", g_rate_pending);
+    retime_client_rate(g_rate_pending);
+    apply_live_camera_settings();
 }
 
 static void install_drawable_physics_timing(PatchInstaller *installer) {
@@ -2786,6 +3168,8 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     }
     g_game = game;
     g_config = config;
+    g_rate = config->target_fps;
+    g_rate_pending = g_rate;
     log_incoming_timing();
 
     g_visual_client_step = 1.0f / (float)config->target_fps;
@@ -2855,7 +3239,7 @@ static void apply_live_camera_settings(void) {
     }
 
     g_applied_camera_adjust_speed = normalize_camera_adjust_speed(
-        g_retail_camera_adjust_speed, g_config->target_fps);
+        g_retail_camera_adjust_speed, g_rate);
     g_applied_keyboard_rotate_speed =
         g_retail_keyboard_rotate_speed * g_camera_scroll_scale;
     *camera_adjust = g_applied_camera_adjust_speed;
@@ -2865,6 +3249,12 @@ static void apply_live_camera_settings(void) {
 
 void game_patches_reset_state(void) {
     if (g_config != NULL) {
+        /* Each session starts at the configured rate; pacing lowers it if needed. */
+        g_rate = g_config->target_fps;
+        g_rate_pending = g_rate;
+        reset_pacing_monitor();
+        g_retail_started = FALSE;
+        g_catch_up_accumulator = 0u;
         /* Seed so particle simulation runs on the first client frame of a session. */
         g_particle_update_accumulator = g_config->target_fps - g_retail_visual_fps;
         g_particle_blend_fraction = 0.0f;
@@ -2893,6 +3283,7 @@ void game_patches_reset_state(void) {
         /* First direct reader gets floor(990/FPS); the hook distributes remainder. */
         *(u32 *)game_address(g_game, g_game->timing.w3d_milliseconds_per_frame) =
             W3D_RETAIL_MILLISECONDS_PER_SECOND / g_config->target_fps;
+        retime_client_rate(g_rate);
         apply_live_camera_settings();
     }
 }

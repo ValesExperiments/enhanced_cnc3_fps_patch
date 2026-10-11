@@ -5,9 +5,15 @@ enabled=1
 
 ; Supported values: 45, 60, 75, 90, or any whole number from 91 to 240
 ; (experimental, e.g. 120, 144, 160). Default: 90. The game logic always
-; runs at 15 Hz; if your PC can't hold the chosen rate, the game slows down
-; (as the retail game does below 30 FPS), so pick a rate it can sustain.
+; runs at 15 Hz. With adaptive_fps=0, a PC that can't hold the chosen rate
+; makes the whole game slow down (as the retail game does below 30 FPS).
 target_fps=90
+
+; Keep the game at 100% speed when the PC can't hold target_fps: the client
+; rate drops to what it can sustain (down to 5 FPS; below 15 FPS a frame
+; runs several game-logic steps) and rises again when there is headroom.
+; 1 = on (default), 0 = off.
+adaptive_fps=1
 
 ; Write fps_patch.log next to the DLL.
 logging=1

@@ -825,7 +825,7 @@ rocket pods** have an abnormally fast idle animation.
 
 ## B11. Queued-order (Alt) waypoint lines step behind the unit
 
-**Status:** implemented 2026-10-11, needs an in-game test.
+**Status:** done, confirmed by the user 2026-10-12.
 
 - With Alt, queued move/attack orders are shown as tan lines (texture
   `EXLaser`, node model `SCMoveHintSml`) from the unit through each order.
@@ -846,6 +846,84 @@ rocket pods** have an abnormally fast idle animation.
   interpolation function (back-pointer offset at +5); and the particle-attach
   code `MOV EDI,[ESI+off]; …; MOV ECX,EDI; CALL getInterpolatedTransform`
   for the Object→Drawable offset. Verified on all four builds.
+
+---
+
+## F2. 100% game speed at any frame rate
+
+**Status:** implemented 2026-10-12 (`adaptive_fps=1`, default on), needs an
+in-game test. The user's request: if a busy scene drops 157 → 60 (or even
+~10) FPS, the game must still run at 100% speed.
+
+### Why it slowed down
+Every conversion in the patch is per frame: frames per logic tick, particle
+and audio steps per frame, W3D milliseconds per frame, camera coefficients
+per frame. Frames that take longer than 1/target therefore slow everything.
+
+### Design
+- **Effective rate `g_rate`** replaces the configured target in every per-
+  frame conversion: the scheduler (fractional above 90, stock 15–90),
+  interpolation, slice flush, W3D clock, particle and audio gates (now loops,
+  so below 30 FPS a frame runs several 30 Hz steps), tracer speed, tint
+  rates, the limiter divisor, camera constants and camera ease.
+- **Synthetic 30 Hz frame** is a running count (whole + remainder in 1/rate)
+  advanced per new client frame, instead of `ceil(frame × 30 / target)`, so
+  it stays continuous across rate changes. The B2 physics blend uses its
+  fraction; the tint sustain uses its "advanced this frame" flag.
+- **Retime** (`retime_client_rate`), applied only at a logic-tick start (the
+  dispatch wrapper with phase 1): it rescales the fixed-point remainders and
+  rewrites camera constants, camera ease, flash interval, the B4 window bytes
+  (`3 × ceil(rate/15)`, written with VirtualProtect), and the game's globals
+  (client FPS, its float, audio ms/frame, visual s/frame, W3D ms/frame,
+  GlobalData FPS limit, engine max FPS, nominal ratio, pacing multiplier).
+- **Pacing monitor** (in the limiter's interval hook, once per limited
+  frame). Round 1 estimated frame work from QPC plus the planned wait and used
+  a fast EMA. In-game (TW 1.9, cap 156) the rate wandered: 120 in the menu,
+  15 → 60 → 45 → 75 in game. The QPC estimate ran up to 1 ms high (the
+  stock wait works in whole `timeGetTime` ms; ~15% of a 6.4 ms budget), and
+  single hitches and loading frames swung the EMA. Round 2: work =
+  `timeGetTime() − stamp`, where the stamp is the stock end of the previous
+  wait (`previous_frame_time_ms`), exactly what the limiter measures. Frames
+  over 250 ms are skipped, and the trimmed mean (middle 60%) of the last
+  ~0.25 s of frames (8–64) is used. Drop when it exceeds the budget by more
+  than 10% (to the best rate ≤ 95% of capacity); rise to the best rate with
+  10% headroom after 0.5 s (round 3: was 2 s, felt slow; back-off doubles up
+  to 8 s when a rise fails within 3 s). The window is cleared after every switch. Every switch is logged with
+  the measured work.
+- **Round 3 (oscillation).** The user's log (TW 1.9, cap 156) showed a cycle
+  about once a second: 156 (work 7.1 ms, GPU-bound: the CPU waits in Present)
+  → 132 (work still 8.7 ms while the GPU queue drains) → ~105 (work 3.9 ms,
+  CPU only) → raise to 156 → … Each switch is felt as a stutter. Fixes:
+  ignore 300 ms of frames after any switch (queues drain); a drop within 3 s
+  of a rise marks that rise as failed and sets a ceiling (the higher of the
+  rate before the rise and the new measurement), returning there. Rises are
+  capped at the ceiling. When the retry timer expires (10 s, doubling to
+  60 s; reset after 60 s without failures) the ceiling rises gently, by 15%
+  or at least one supported step, instead of being removed. Simulated
+  (temp/gpu_limit_sim.py, CPU 3.5 ms, GPU 7.4/11 ms, 2-frame queue): it
+  settles at 133 / 90 FPS with only brief, smaller probes at 12 s, 33 s, ….
+- **Supported rates:** the target; above 90 any rate; 15–90 multiples of 15
+  (the stock schedule needs whole frames per tick); below 15 any whole number,
+  down to 5.
+- **Below 15 FPS:** the game's integer rate globals stay at 15 (stock code
+  divides by `clientFPS/15`; 0 would crash), so its schedule runs one whole
+  tick per frame. After it, `run_catch_up_ticks` dispatches more whole ticks
+  (Bresenham `15 / rate` per frame, at most 4 extra). A network stall ends
+  the burst (phase set to 6 so the next frame retries). The patch's own
+  ratio uses are clamped to ≥ 1.
+
+### Offline simulation (temp/adaptive_sim.py)
+Per-frame work 4/9/20/45/120/70/4 ms → logic 101/98/99/98/94→101/101/101%
+(segments include transitions; retail itself runs 101% because its tick is
+66 ms). At 100–120 ms per frame it settles at 8 FPS and 100–101% speed. At
+250 ms (4 FPS, below the 5 FPS floor) it runs at 76%, as expected.
+
+### Known limits
+- Rate changes alter `clientFPS`; stock timers created in frames before a
+  change run at the new rate (brief timing blips during transitions).
+- Below 30 FPS some 30 Hz systems step coarser (e.g. the tracer manager emits
+  once per frame; vehicle tilt springs update once per frame).
+- Multiplayer is untested (lockstep stalls are respected by the catch-up).
 
 ---
 
