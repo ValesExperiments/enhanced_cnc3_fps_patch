@@ -144,6 +144,11 @@ Fix or remove anything that turns out to be wrong.
   `CALL memcpy` site is a cheap way to substitute what gets uploaded (used
   for the fog texture rows).
 - MinGW's `<windows.h>` already defines `CDECL` (empty); use `__cdecl`.
+- **"Right speed but still steppy" can be quantisation, not timing.** The
+  grey fog of war is an ARGB4444 texture (16 shades), so slow fades step
+  visibly at any FPS. Check texture formats (`FUN_0075609A(w, h, D3DFMT, …)`
+  in TW) before chasing timing.
+- Unit names: Buzzers are **Scrin**, not Nod.
 
 ## Lessons from tooling problems
 - A PyGhidra/JVM process does **not** exit when its MCP client disconnects,

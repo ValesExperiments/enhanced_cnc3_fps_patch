@@ -538,7 +538,7 @@ smoke disappears "glitchily". Also asked: fix the camera ease in advance.
 ### User feedback (round 3) and swarm (implemented, needs a test)
 Ion Cannon ball confirmed smooth. Smoke still disappears abruptly, but the
 user saw the same without the DLL, so it's vanilla behaviour and ignored.
-Nothing odd noticed after the camera-ease change. Swarms (Nod Buzzers) were
+Nothing odd noticed after the camera-ease change. Swarms (Scrin Buzzers) were
 still 30 Hz.
 
 - **Swarm** (`SwarmDrawModule::Draw`, TW 0x5B68B0 / KW 0x61D374, `RET 0xC`
@@ -555,7 +555,8 @@ particles).
 
 ## B7. Fog of war clears in steps
 
-**Status:** implemented 2026-10-11, needs an in-game test.
+**Status:** round 1 confirmed the fade speed is now right; round 2 (8-bit
+shroud texture) implemented 2026-10-11, needs an in-game test.
 
 ### Symptom
 When a unit walks into the shroud, the revealed area clears in visible
@@ -610,6 +611,32 @@ texture, `+0x38` target levels, `+0x3C` shown levels.
   copy loop (the `×2`/`×4` row scale tells them apart). The fade timing block
   supplies the stamp (both operands must agree), rate and cap. Verified
   offline on TW 1.10, TW 1.9, KW 1.03 and KW 1.02. Static writes are now 51.
+
+### User feedback (round 1) and round 2
+The **grey transparent fog** now clears at the right speed, but still in
+visible steps, at roughly 30 per second. That fog is the `+0x198` shroud
+texture. Its cells are **ARGB4444**: RGB = `ftol(level × GlobalData
++0xCE4/+0xCE8/+0xCEC)` and alpha = `min(255, max(0, level−4) × 255/46)`,
+truncated to 4 bits. A fog→clear fade therefore crosses only a few of 16
+brightness steps, so it looks stepped at any FPS (at 30 FPS it matched the
+frame rate, so it went unnoticed).
+
+Round 2 gives that texture 8 bits per channel:
+- **Format:** in its creator (`FUN_00807070`, also used on device restore),
+  `PUSH 1Ah` (D3DFMT_A4R4G4B4) is patched to `15h` (A8R8G8B8).
+- **Rows:** the shroud upload's row `memcpy` (width × 2 bytes) is replaced.
+  Each texel is computed at 8-bit precision from the cell's shown level
+  (`+0x3C`, clamped to GlobalData `+0xCF2`), using the game's own formula via a
+  256-entry table rebuilt each frame. If repacking that texel to 4444 doesn't
+  equal the game's cell (an unknown writer), the game's cell is widened
+  instead (nibble × 0x11).
+- **Fill:** the upload's whole-texture fill (`FUN_00813D90`, which also sets
+  the one-texel border the rows never touch, when the texture is new or
+  restored) is replaced by a 32-bit fill through the game's lock/unlock
+  (`FUN_0074C91F` / `FUN_0074C9C3`).
+- Only these two paths write the texture (all `FUN_0074C96D`/`FUN_0074C91F`
+  lock calls in the terrain code were checked). GlobalData offsets are read
+  from the converter's code. Static writes are now 54.
 
 ### Done when
 Walking a unit into fog/shroud reveals the area as a smooth wave at 90 FPS,

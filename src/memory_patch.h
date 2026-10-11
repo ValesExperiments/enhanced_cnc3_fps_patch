@@ -4,7 +4,7 @@
 #include "common.h"
 
 enum {
-    /* 51 writes are installed as of 2026-10-11; keep generous headroom. */
+    /* 54 writes are installed as of 2026-10-11; keep generous headroom. */
     PATCH_TRANSACTION_CAPACITY = 64,
     PATCH_MAX_BYTES = 48
 };

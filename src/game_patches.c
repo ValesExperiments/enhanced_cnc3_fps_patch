@@ -664,7 +664,7 @@ static int THISCALL draw_render_object_particles(void *module, void *a, void *b,
 }
 
 /*
- * Swarm particles (Nod Buzzers) keep plain records that the swarm draw turns
+ * Swarm particles (Scrin Buzzers) keep plain records that the swarm draw turns
  * into vertices. Each 30 Hz step does "velocity += attraction; position +=
  * velocity", so while a swarm is drawn each position is temporarily moved
  * forward by velocity times the elapsed fraction of the next step.
@@ -849,9 +849,17 @@ static int THISCALL draw_trails_interpolated(void *module, void *a, void *b, voi
  * uploaded from a smoothed copy whose channels move toward the game's cells
  * by at most a full range per logic step (66 ms), which turns those pops
  * into ramps. The game's own cells are never modified.
+ *
+ * The shroud texture is ARGB4444: its fog-to-clear fade spans only a handful
+ * of 4-bit steps, so even a smooth fade showed ~30 coarse steps per second.
+ * It is now created as A8R8G8B8, and its rows are filled with full-precision
+ * texels converted from each cell's shown level the way the game converts
+ * them, falling back to the game's 16-bit cell (widened) if they disagree.
  */
 typedef void(THISCALL *ShroudFadeFn)(void *texture, void *arg);
 typedef void *(__cdecl *RowCopyFn)(void *destination, const void *source, size_t size);
+typedef u8 *(THISCALL *TextureLockFn)(void *holder, i32 *pitch, u32 flag);
+typedef void(THISCALL *TextureUnlockFn)(void *holder);
 
 enum {
     FOG_SMOOTH_MILLISECONDS = 1000 / 15,
@@ -861,7 +869,14 @@ enum {
 };
 
 static ShroudFadeFn g_original_shroud_fades[SHROUD_TEXTURE_KINDS];
-static RowCopyFn g_original_fog_row_copy;
+static RowCopyFn g_game_memcpy;
+static TextureLockFn g_texture_lock;
+static TextureUnlockFn g_texture_unlock;
+/* Set by the shroud fade wrapper for the row copies of the same upload. */
+static const u16 *g_shroud_cells;
+static const u8 *g_shroud_shown_levels;
+static u32 g_shroud_cell_count;
+static u32 g_shroud_texels[256];
 /* Set by the fog fade wrapper for the row copies of the same upload. */
 static const u8 *g_fog_cells;
 static u32 g_fog_cell_count;
@@ -898,8 +913,112 @@ static void run_shroud_fade(u32 kind, void *texture, void *arg) {
     *stamp -= unused;
 }
 
+static u8 *shroud_global_data(void) {
+    return *(u8 **)game_address(g_game, g_game->timing.global_data_pointer);
+}
+
+/* The game's level -> ARGB4444 conversion, kept at 8 bits per channel. */
+static u32 convert_shroud_level(const u8 *global_data, u32 level) {
+    const ShroudLayout *shroud = &g_game->shroud;
+    u32 channels[3];
+    i32 alpha = (i32)level - 4;
+    u32 i;
+
+    if (level == 0xFFu) return 0xFFFFFFFFu;
+    for (i = 0; i < 3; ++i) {
+        float scale = *(const float *)(global_data + shroud->global_colour_scale[i]);
+        /* ftol truncation; the 4-bit packing keeps only the low byte. */
+        channels[i] = (u32)(i32)((double)level * (double)scale) & 0xFFu;
+    }
+    alpha = alpha > 0 ? alpha * 255 / 46 : 0;
+    if (alpha > 255) alpha = 255;
+    return (u32)alpha << 24 | channels[0] << 16 | channels[1] << 8 | channels[2];
+}
+
+static u16 pack_shroud_texel(u32 texel) {
+    return (u16)((texel >> 16 & 0xF000u) | (texel >> 12 & 0x0F00u) |
+                 (texel >> 8 & 0x00F0u) | (texel >> 4 & 0x000Fu));
+}
+
+static u32 widen_shroud_cell(u32 cell) {
+    return ((cell >> 12 & 0xFu) * 0x11u) << 24 | ((cell >> 8 & 0xFu) * 0x11u) << 16 |
+           ((cell >> 4 & 0xFu) * 0x11u) << 8 | (cell & 0xFu) * 0x11u;
+}
+
+static void refresh_shroud_texels(void) {
+    const u8 *global_data = shroud_global_data();
+    u32 minimum;
+    u32 level;
+
+    if (global_data == NULL) return;
+    minimum = global_data[g_game->shroud.global_minimum_level];
+    /* Cells are converted from the level clamped to GlobalData's minimum. */
+    for (level = 0; level < 256u; ++level) {
+        g_shroud_texels[level] =
+            convert_shroud_level(global_data, level < minimum ? minimum : level);
+    }
+}
+
 static void THISCALL fade_shroud_cells(void *texture, void *arg) {
+    const u8 *shroud = (const u8 *)texture;
+    u32 width = *(const u32 *)(shroud + SHROUD_WIDTH);
+    u32 height = *(const u32 *)(shroud + SHROUD_HEIGHT);
+
     run_shroud_fade(SHROUD_TEXTURE_SHROUD, texture, arg);
+    refresh_shroud_texels();
+    g_shroud_cells = *(const u16 *const *)(shroud + SHROUD_CELLS);
+    g_shroud_shown_levels = *(const u8 *const *)(shroud + SHROUD_SHOWN_LEVELS);
+    g_shroud_cell_count = width <= FOG_MAX_DIMENSION && height <= FOG_MAX_DIMENSION
+                              ? width * height : 0;
+}
+
+/* Replaces memcpy(dst, cells + row, width * 2) for the A8R8G8B8 texture. */
+static void *__cdecl copy_shroud_row_precise(void *destination, const void *source,
+                                             size_t size) {
+    const u16 *cells = (const u16 *)source;
+    u32 *texels = (u32 *)destination;
+    u32 count = (u32)size / sizeof(u16);
+    u32 first = 0;
+    BOOL levels_known = g_shroud_cells != NULL && g_shroud_shown_levels != NULL &&
+                        cells >= g_shroud_cells;
+    u32 i;
+
+    if (levels_known) {
+        first = (u32)(cells - g_shroud_cells);
+        levels_known = first <= g_shroud_cell_count && count <= g_shroud_cell_count - first;
+    }
+    for (i = 0; i < count; ++i) {
+        u32 texel = widen_shroud_cell(cells[i]);
+        if (levels_known) {
+            u32 precise = g_shroud_texels[g_shroud_shown_levels[first + i]];
+            /* Only trust the shown level if it explains the game's cell. */
+            if (pack_shroud_texel(precise) == cells[i]) texel = precise;
+        }
+        texels[i] = texel;
+    }
+    return destination;
+}
+
+/* Replaces the whole-texture fill (border included) for the A8R8G8B8 texture. */
+static void THISCALL fill_shroud_texture(void *texture, u32 level, void *holder) {
+    const u8 *shroud = (const u8 *)texture;
+    i32 width = *(const i32 *)(shroud + SHROUD_TEXTURE_WIDTH);
+    i32 height = *(const i32 *)(shroud + SHROUD_TEXTURE_HEIGHT);
+    i32 pitch = 0;
+    u8 *bits;
+    u32 texel;
+    i32 x;
+    i32 y;
+
+    refresh_shroud_texels();
+    texel = g_shroud_texels[level & 0xFFu];
+    bits = g_texture_lock(holder, &pitch, 0);
+    if (bits != NULL) {
+        for (y = 0; y < height; ++y, bits += pitch) {
+            for (x = 0; x < width; ++x) ((u32 *)bits)[x] = texel;
+        }
+    }
+    g_texture_unlock(holder);
 }
 
 static void prepare_fog_smoothing(const u8 *texture) {
@@ -979,12 +1098,12 @@ static void *__cdecl copy_fog_row_smoothed(void *destination, const void *source
 
     if (g_fog_cells == NULL || row < g_fog_cells || (size & 3u) != 0 ||
         ((u32)(row - g_fog_cells) & 3u) != 0) {
-        return g_original_fog_row_copy(destination, source, size);
+        return g_game_memcpy(destination, source, size);
     }
     first = (u32)(row - g_fog_cells) / sizeof(u32);
     count = (u32)size / sizeof(u32);
     if (first > g_fog_cell_count || count > g_fog_cell_count - first) {
-        return g_original_fog_row_copy(destination, source, size);
+        return g_game_memcpy(destination, source, size);
     }
 
     /* The upload copies every row, so the copy is complete once row 0 is seen. */
@@ -995,7 +1114,7 @@ static void *__cdecl copy_fog_row_smoothed(void *destination, const void *source
         smoothed[i] = g_fog_snap ? cells[i]
                                  : approach_fog_cell(smoothed[i], cells[i], g_fog_max_step);
     }
-    return g_original_fog_row_copy(destination, smoothed, size);
+    return g_game_memcpy(destination, smoothed, size);
 }
 
 /*
@@ -1662,26 +1781,45 @@ static void install_shroud_timing(PatchInstaller *installer) {
     static const char *const fade_names[SHROUD_TEXTURE_KINDS] = {
         "shroud texture fade call", "fog texture fade call"
     };
-    static void *const fade_wrappers[SHROUD_TEXTURE_KINDS] = {
-        (void *)fade_shroud_cells, (void *)fade_fog_cells
-    };
     const ShroudLayout *shroud = &g_game->shroud;
+    const struct {
+        const char *name;
+        const BranchSite *call;
+        void *replacement;
+    } calls[] = {
+        { fade_names[SHROUD_TEXTURE_SHROUD], &shroud->fades[SHROUD_TEXTURE_SHROUD].fade_call,
+          (void *)fade_shroud_cells },
+        { fade_names[SHROUD_TEXTURE_FOG], &shroud->fades[SHROUD_TEXTURE_FOG].fade_call,
+          (void *)fade_fog_cells },
+        { "fog texture row copy call", &shroud->fog_row_copy_call,
+          (void *)copy_fog_row_smoothed },
+        { "shroud texture row copy call", &shroud->shroud_row_copy_call,
+          (void *)copy_shroud_row_precise },
+        { "shroud texture fill call", &shroud->shroud_fill_call,
+          (void *)fill_shroud_texture },
+    };
+    static const u8 retail_format = 0x1A;  /* D3DFMT_A4R4G4B4 */
+    static const u8 precise_format = 0x15; /* D3DFMT_A8R8G8B8 */
     u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
     u32 kind;
+    u32 i;
 
     for (kind = 0; kind < SHROUD_TEXTURE_KINDS; ++kind) {
-        const BranchSite *call = &shroud->fades[kind].fade_call;
-        g_original_shroud_fades[kind] = (ShroudFadeFn)game_address(g_game, call->target);
-        encode_rel32(&call_patch[1], game_address(g_game, call->instruction + 5u),
-                     fade_wrappers[kind]);
-        patch_branch(installer, fade_names[kind], call, 0xE8, call_patch, sizeof(call_patch));
+        g_original_shroud_fades[kind] =
+            (ShroudFadeFn)game_address(g_game, shroud->fades[kind].fade_call.target);
     }
-    g_original_fog_row_copy = (RowCopyFn)game_address(g_game, shroud->fog_row_copy_call.target);
-    encode_rel32(&call_patch[1],
-                 game_address(g_game, shroud->fog_row_copy_call.instruction + 5u),
-                 copy_fog_row_smoothed);
-    patch_branch(installer, "fog texture row copy call", &shroud->fog_row_copy_call, 0xE8,
-                 call_patch, sizeof(call_patch));
+    g_game_memcpy = (RowCopyFn)game_address(g_game, shroud->fog_row_copy_call.target);
+    g_texture_lock = (TextureLockFn)game_address(g_game, shroud->texture_lock_function);
+    g_texture_unlock = (TextureUnlockFn)game_address(g_game, shroud->texture_unlock_function);
+
+    for (i = 0; i < ARRAY_COUNT(calls); ++i) {
+        encode_rel32(&call_patch[1], game_address(g_game, calls[i].call->instruction + 5u),
+                     calls[i].replacement);
+        patch_branch(installer, calls[i].name, calls[i].call, 0xE8, call_patch,
+                     sizeof(call_patch));
+    }
+    patch_bytes(installer, "shroud texture format", shroud->shroud_format_immediate,
+                &retail_format, &precise_format, sizeof(precise_format));
 }
 
 static void install_drawable_physics_timing(PatchInstaller *installer) {
@@ -2065,6 +2203,7 @@ void game_patches_reset_state(void) {
         memset(g_particle_cache, 0, sizeof(g_particle_cache));
         /* A new session's fog starts from the game's cells. */
         g_fog_smoothed_source = NULL;
+        g_shroud_cells = NULL;
         g_frame_times_logged = 0;
         reset_keyboard_clock();
         /* First direct reader gets floor(990/FPS); the hook distributes remainder. */

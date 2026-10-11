@@ -1277,7 +1277,8 @@ static const u16 g_fog_upload_pattern[] = {
 /*
  * Inside each fade: elapsed = timeGetTime() - stamp; stamp += elapsed;
  * step = ftol(elapsed * rate); if (step > cap) step = cap.
- * Stamp operands at +7/+19, rate at +41, cap at +54.
+ * Stamp operands at +7/+19, rate at +41, cap at +54. Then the fade loads
+ * the shown (+0x3C) and target (+0x38) level arrays.
  */
 static const u16 g_shroud_fade_timing_pattern[] = {
     0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
@@ -1288,7 +1289,56 @@ static const u16 g_shroud_fade_timing_pattern[] = {
     0xD8, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
     0xD8, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
     0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
-    0x89, 0x45, PATTERN_ANY, 0xB8
+    0x89, 0x45, PATTERN_ANY, 0xB8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x39, 0x45, PATTERN_ANY, 0x7E, 0x03, 0x89, 0x45, PATTERN_ANY,
+    0x80, 0x7F, PATTERN_ANY, 0x00, 0x8B, 0x4F, SHROUD_SHOWN_LEVELS,
+    0x8B, 0x47, SHROUD_TARGET_LEVELS
+};
+
+/* Shroud texture creation: PUSH 0; 1; 1; PUSH 1Ah (A4R4G4B4); height; width. */
+static const u16 g_shroud_texture_format_pattern[] = {
+    0x6A, 0x00, 0x33, 0xDB, 0x43, 0x53, 0x53, 0x6A, 0x1A, 0xFF, 0x76, 0x24,
+    0x8D, 0x7E, 0x1C, 0xFF, 0x76, 0x20, 0x8B, 0xCF, 0xE8,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B, 0xCF, 0xE8
+};
+
+/*
+ * Whole shroud texture fill (TW 1.10 VA 0x813D90), entered from the shroud
+ * upload: clamp the level to GlobalData's minimum (+10), convert it (+30),
+ * lock (+49), store one 16-bit value per texel, unlock (+92), RET 8.
+ */
+static const u16 g_shroud_fill_pattern[] = {
+    0x55, 0x8B, 0xEC, 0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8A, 0x80, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x38, 0x45, 0x08, 0x53, 0x56, 0x57, 0x8B, 0xF1, 0x73, 0x03, 0x88, 0x45, 0x08,
+    0xFF, 0x75, 0x08, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x59, 0x8B, 0x4D, 0x0C, 0x0F, 0xB7, 0xF8, 0x33, 0xDB, 0x53, 0x8D, 0x45, 0x08, 0x50,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x39, 0x5E, 0x24, 0x7E, 0x1E, 0x8B, 0x56, 0x20, 0x33, 0xC9, 0x85, 0xD2, 0x7E, 0x0C,
+    0x66, 0x89, 0x3C, 0x48, 0x8B, 0x56, 0x20, 0x41, 0x3B, 0xCA, 0x7C, 0xF4,
+    0x03, 0x45, 0x08, 0x43, 0x3B, 0x5E, 0x24, 0x7C, 0xE5, 0x8B, 0x4D, 0x0C,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x5F, 0x5E, 0x5B, 0x5D, 0xC2, 0x08, 0x00
+};
+
+/*
+ * Level -> ARGB4444 converter (TW 1.10 VA 0x813CDD): blue/green/red =
+ * ftol(level * GlobalData float at +27/+40/+55); alpha = min(255,
+ * max(0, level - 4) * 255 / 46); level 255 gives 0xFFFF.
+ */
+static const u16 g_shroud_cell_converter_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x53, 0x56,
+    0x8B, 0x35, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x57, 0x0F, 0xB6, 0x7D, 0x08, 0x89, 0x7D, 0xFC, 0xDB, 0x45, 0xFC,
+    0xD9, 0x86, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xD8, 0xC9,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xD9, 0x86, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xD8, 0xC9, 0x8B, 0xD8,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xD8, 0x8E, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x89, 0x45, 0xF0,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x83, 0x65, 0xF8, 0x00, 0x8B, 0xF0, 0x8D, 0x47, 0xFC, 0xB9, 0xFF, 0x00, 0x00, 0x00,
+    0x89, 0x45, 0xFC, 0x85, 0xC0, 0x89, 0x4D, 0xF4, 0x8D, 0x45, 0xFC, 0x7F, 0x03,
+    0x8D, 0x45, 0xF8, 0x8B, 0x00, 0x69, 0xC0, 0xFF, 0x00, 0x00, 0x00, 0x99, 0x6A, 0x2E
 };
 
 static BOOL resolve_shroud_fade(u8 *module, u32 image_size, u32 upload,
@@ -1329,9 +1379,13 @@ static BOOL resolve_shroud_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ShroudLayout *shroud = &game->shroud;
     u32 image_size = game->pe_size_of_image;
+    u32 global_data = (u32)(uintptr_t)(module + game->timing.global_data_pointer);
     u32 shroud_upload;
     u32 fog_upload;
-    u32 shroud_copy;
+    u32 match;
+    u32 fill;
+    u32 converter;
+    u32 i;
 
     if (!FIND_UNIQUE(module, nt, g_shroud_upload_pattern, &shroud_upload) ||
         !FIND_UNIQUE(module, nt, g_fog_upload_pattern, &fog_upload) ||
@@ -1345,12 +1399,50 @@ static BOOL resolve_shroud_sites(
     }
     /* Both row copies call the same memcpy. */
     shroud->fog_row_copy_call.instruction = fog_upload + 86u;
-    return decode_relative_target(module, image_size, shroud_upload + 85u, 0xE8,
-                                  &shroud_copy) &&
-           decode_relative_target(module, image_size,
-                                  shroud->fog_row_copy_call.instruction, 0xE8,
-                                  &shroud->fog_row_copy_call.target) &&
-           shroud_copy == shroud->fog_row_copy_call.target;
+    shroud->shroud_row_copy_call.instruction = shroud_upload + 85u;
+    if (!decode_relative_target(module, image_size,
+                                shroud->shroud_row_copy_call.instruction, 0xE8,
+                                &shroud->shroud_row_copy_call.target) ||
+        !decode_relative_target(module, image_size,
+                                shroud->fog_row_copy_call.instruction, 0xE8,
+                                &shroud->fog_row_copy_call.target) ||
+        shroud->shroud_row_copy_call.target != shroud->fog_row_copy_call.target) {
+        return FALSE;
+    }
+
+    if (!FIND_UNIQUE(module, nt, g_shroud_texture_format_pattern, &match)) return FALSE;
+    shroud->shroud_format_immediate = match + 8u;
+
+    /* The shroud upload's "+0x35 dirty" call is the whole-texture fill. */
+    shroud->shroud_fill_call.instruction = shroud_upload + 29u;
+    if (!decode_relative_target(module, image_size, shroud->shroud_fill_call.instruction,
+                                0xE8, &shroud->shroud_fill_call.target)) {
+        return FALSE;
+    }
+    fill = shroud->shroud_fill_call.target;
+    if (fill > image_size - ARRAY_COUNT(g_shroud_fill_pattern) ||
+        !pattern_matches(module + fill, g_shroud_fill_pattern,
+                         ARRAY_COUNT(g_shroud_fill_pattern)) ||
+        load_u32(module + fill + 4u) != global_data ||
+        !decode_relative_target(module, image_size, fill + 30u, 0xE8, &converter) ||
+        !decode_relative_target(module, image_size, fill + 49u, 0xE8,
+                                &shroud->texture_lock_function) ||
+        !decode_relative_target(module, image_size, fill + 92u, 0xE8,
+                                &shroud->texture_unlock_function) ||
+        converter > image_size - ARRAY_COUNT(g_shroud_cell_converter_pattern) ||
+        !pattern_matches(module + converter, g_shroud_cell_converter_pattern,
+                         ARRAY_COUNT(g_shroud_cell_converter_pattern)) ||
+        load_u32(module + converter + 10u) != global_data) {
+        return FALSE;
+    }
+    shroud->global_minimum_level = load_u32(module + fill + 10u);
+    shroud->global_colour_scale[0] = load_u32(module + converter + 55u); /* red */
+    shroud->global_colour_scale[1] = load_u32(module + converter + 40u); /* green */
+    shroud->global_colour_scale[2] = load_u32(module + converter + 27u); /* blue */
+    for (i = 0; i < 3; ++i) {
+        if (shroud->global_colour_scale[i] > 0x4000u) return FALSE;
+    }
+    return shroud->global_minimum_level <= 0x4000u;
 }
 
 static BOOL resolve_objective_ui_sites(

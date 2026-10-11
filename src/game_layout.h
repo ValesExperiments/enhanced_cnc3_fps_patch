@@ -181,6 +181,24 @@ typedef struct ShroudLayout {
     ShroudFadeSite fades[SHROUD_TEXTURE_KINDS];
     /* The fog upload's per-row memcpy(dst, cells + row, width * 4). */
     BranchSite fog_row_copy_call;
+    /*
+     * The 16-bit shroud texture: the D3DFMT_A4R4G4B4 (0x1A) immediate in its
+     * creation, the upload's per-row memcpy(dst, cells + row, width * 2), and
+     * the upload's call of the whole-texture fill (level, lock holder), which
+     * also sets the one-texel border the row copies never touch.
+     */
+    u32 shroud_format_immediate;
+    BranchSite shroud_row_copy_call;
+    BranchSite shroud_fill_call;
+    /* Texture lock(holder, &pitch, flag) / unlock(holder), both __thiscall. */
+    u32 texture_lock_function;
+    u32 texture_unlock_function;
+    /*
+     * GlobalData fields read by the level -> ARGB4444 cell converter: the
+     * minimum shroud level and the red/green/blue level multipliers.
+     */
+    u32 global_minimum_level;
+    u32 global_colour_scale[3];
 } ShroudLayout;
 
 typedef struct SelectionPanelLayout {
@@ -314,7 +332,7 @@ enum {
     TRAIL_POINT_SIZE = 0x14,
     TRAIL_POINTS_PER_BLOCK = 6,
     /*
-     * Swarm storage (Nod Buzzers): 0x1C-byte records at storage +0x10..+0x14:
+     * Swarm storage (Scrin Buzzers): 0x1C-byte records at storage +0x10..+0x14:
      * position, velocity (+0x0C), life. Each 30 Hz step: velocity +=
      * attraction; position += velocity.
      */
@@ -335,6 +353,11 @@ enum {
     SHROUD_WIDTH = 0x00,
     SHROUD_HEIGHT = 0x04,
     SHROUD_CELLS = 0x18,
+    /* Texture size (cells plus a one-texel border), target and shown levels. */
+    SHROUD_TEXTURE_WIDTH = 0x20,
+    SHROUD_TEXTURE_HEIGHT = 0x24,
+    SHROUD_TARGET_LEVELS = 0x38,
+    SHROUD_SHOWN_LEVELS = 0x3C,
 
     /* SingleUnitModeHandler -> SelectionDetails::PanelImpl -> panel gadget. */
     SELECTION_HANDLER_PANEL = 0x14,
