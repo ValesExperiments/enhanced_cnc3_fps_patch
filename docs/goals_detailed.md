@@ -902,6 +902,57 @@ per frame. Frames that take longer than 1/target therefore slow everything.
   or at least one supported step, instead of being removed. Simulated
   (temp/gpu_limit_sim.py, CPU 3.5 ms, GPU 7.4/11 ms, 2-frame queue): it
   settles at 133 / 90 FPS with only brief, smaller probes at 12 s, 33 s, ….
+- **Round 4 (model).** The user's tests showed the remaining stutter is the
+  game's own heavy logic (1% lows of 15 FPS with 7 AIs; same at a fixed 105
+  FPS without adaptive pacing), and the GPU was barely used: the game is
+  CPU-bound on one thread, so round 3's "GPU queue" explanation was wrong.
+  The cascades (156 → 134 → 75) came from logic: at lower rates the same
+  logic is spread over fewer frames, so the average frame gets heavier.
+  Now:
+  - The dispatch wrapper counts the logic phases each frame ran
+    (`dispatch_counted`: the stock batch via the engine phase before/after;
+    catch-up ticks count 6; a stall counts 0).
+  - The monitor fits `work = drawing + phases × phase_cost` by least squares
+    over the last second. With no phase-count variance (fixed schedules) it
+    reuses the last fit. Load = mean work × rate. It drops when load > 97%
+    to the rate whose second fits 90%: `(900 − 90 × phase_cost) / drawing`.
+    It rises when the 85% rate is higher and load < 90%, for 0.5 s. Settle
+    and ceiling stay as safety nets.
+  - **Limiter debt repayment** (adaptive only): a frame that overran its
+    interval leaves a debt (cap 250 ms, loading ignored) that the next frames
+    repay by waiting less. The stock limiter never recovers lost time, so
+    heavy logic frames permanently slowed the game even when the second as a
+    whole fitted (simulated: 87% speed at 156 FPS with 84% CPU load).
+  - Simulated (temp/model_sim.py, one thread, per-phase costs with one heavy
+    phase): light → 156 FPS; 7-AI-like (25 ms logic/tick, 3 ms drawing) → 156
+    FPS; with 6 / 9 ms drawing → one drop straight to 97 / 60 FPS; logic ≈
+    90% of the CPU → 5 FPS with catch-up. All at 100–101% speed.
+- **Round 5 (robust fit).** The user's test felt much better, but with 1% lows
+  of ~20 FPS the mod dropped straight to 5 FPS. The log showed "logic 178.00
+  ms/tick, drawing 0.30 ms/frame, load 98% at 75 FPS; drop to 5". At 75 FPS
+  (stock schedule, phases 1,1,1,1,2 per frame) the phase counts barely vary,
+  so the least-squares split was ill-conditioned and gave almost all the work
+  to logic. A stale fit reused from another rate is just as unreliable. There
+  was also drop/raise churn on bursty load (drop at 97% → 38% → raise).
+  Now:
+  - The split is trusted only with phase-count variance ≥ 0.15 and 15–85%
+    of frames running no logic (only the high-rate schedule has those).
+    Logic is capped at 90% of the measured work. Otherwise all work is
+    treated as scaling with the rate (phase cost 0); stale fits are no
+    longer reused.
+  - Window: two seconds of frames (`2 × g_rate`, 16–512); decides once one
+    second is in.
+  - Drop only when load > 100% over that window (short bursts are repaid by
+    the limiter debt). Never below half the current rate in one step.
+  - Rise only after one second with load < 75%, to the 85% rate, at most
+    1.5× per step, still capped by the failed-rise ceiling.
+  - Simulated (temp/model_sim5.py): light, 7-AI-like and short-spike loads
+    stay at 156 with no switches. A game-like load with dips to ~20 FPS stays
+    at 156. Starting inside the stock schedule (75 / 45) holds. Logic that
+    doubles for 1 s every 6 s settles at 112 (lowest 75, 4 switches a
+    minute). Logic at 93% of the CPU walks down to 11 FPS. All at 100–101%
+    speed, except bursts whose logic alone exceeds a second (96.8%,
+    physically unavoidable).
 - **Supported rates:** the target; above 90 any rate; 15–90 multiples of 15
   (the stock schedule needs whole frames per tick); below 15 any whole number,
   down to 5.

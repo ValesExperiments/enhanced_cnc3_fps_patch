@@ -29,6 +29,8 @@ static u32 g_particle_update_accumulator;
  */
 static u32 g_rate = 30u;
 static u32 g_rate_pending = 30u;
+/* Logic phases dispatched during the current client frame. */
+static u32 g_frame_phases;
 static void monitor_frame_pacing(u32 interval_ms);
 static void apply_live_camera_settings(void);
 /* Elapsed fraction of the current 30 Hz particle step; frozen while paused. */
@@ -249,6 +251,19 @@ static BOOL logic_tick_running(void) {
  * 15 per second of frames (Bresenham: 10 FPS gives 1, 2, 1, 2...). A network
  * stall ends the burst; at most four extra ticks run per frame.
  */
+/*
+ * Dispatch and count the logic phases that ran (the stock batch advances
+ * the engine's phase; a network stall at phase 1 runs none).
+ */
+static void dispatch_counted(u8 *engine, u32 phase) {
+    u32 after;
+
+    g_original_dispatch_logic_phase(engine, phase);
+    if (phase == 1u && !logic_tick_running()) return;
+    after = *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE);
+    g_frame_phases += after >= phase ? after - phase + 1u : 1u;
+}
+
 enum { MAX_CATCH_UP_TICKS = 4 };
 static u32 g_catch_up_accumulator;
 
@@ -262,7 +277,7 @@ static void run_catch_up_ticks(u8 *engine) {
     /* The frame's own tick has already run. */
     for (i = 1; i < ticks && i <= MAX_CATCH_UP_TICKS; ++i) {
         *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) = 1u;
-        g_original_dispatch_logic_phase(engine, 1u);
+        dispatch_counted(engine, 1u);
         if (!logic_tick_running()) {
             /* Stalled: the next frame wraps and retries the tick. */
             *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) = LOGIC_PHASE_COUNT;
@@ -278,14 +293,14 @@ static void THISCALL dispatch_logic_phase_scheduled(void *engine_pointer, u32 ph
     /* A new logic tick is the only safe point to change the client rate. */
     if (phase == 1u) apply_pending_rate();
     if (!high_rate_schedule()) {
-        g_original_dispatch_logic_phase(engine_pointer, phase);
+        dispatch_counted(engine, phase);
         if (phase == 1u && g_rate < LOGIC_FPS && logic_tick_running()) {
             run_catch_up_ticks(engine);
         }
         return;
     }
     if (phase == 1u) {
-        g_original_dispatch_logic_phase(engine_pointer, phase);
+        dispatch_counted(engine, phase);
         /* A network stall clears the GameClient flag; the engine then reverts. */
         if (logic_tick_running()) {
             g_tick_accumulator += g_rate;
@@ -298,12 +313,12 @@ static void THISCALL dispatch_logic_phase_scheduled(void *engine_pointer, u32 ph
     }
     if (g_tick_frames == 0u) {
         /* Before the first scheduled tick: one phase per frame, as at 90 FPS. */
-        g_original_dispatch_logic_phase(engine_pointer, phase);
+        dispatch_counted(engine, phase);
         return;
     }
     next = g_tick_frame < g_tick_frames ? g_tick_frame + 1u : g_tick_frames;
     if (scheduled_phases_done(next, g_tick_frames) >= phase) {
-        g_original_dispatch_logic_phase(engine_pointer, phase);
+        dispatch_counted(engine, phase);
     } else {
         /* Render-only frame: undo GameEngine::update's phase increment. */
         *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) = phase - 1u;
@@ -1794,6 +1809,38 @@ static void log_frame_time_sample(u8 *engine, u32 interval, u32 multiplier) {
     }
 }
 
+/*
+ * With adaptive pacing, the limiter keeps an absolute schedule: a frame that
+ * overran its interval (a heavy logic phase) leaves a debt that the next
+ * frames repay by waiting less, so the game keeps its real-time speed
+ * whenever the second as a whole fits. The stock limiter waits the full
+ * interval after every frame and never recovers lost time. Debt is capped at
+ * 250 ms and loading stalls are ignored, so a hitch never fast-forwards long.
+ */
+enum { LIMITER_DEBT_MAX_MS = 250 };
+static u32 g_limiter_debt_ms;
+
+static u32 repay_limiter_debt(u32 interval) {
+    u32 stamp;
+    u32 work;
+    u32 repay;
+
+    if (!g_config->adaptive_fps || g_config->target_fps <= g_retail_visual_fps) return interval;
+    stamp = *(volatile u32 *)game_address(g_game, g_game->pacing.previous_frame_time_ms);
+    work = (u32)timeGetTime() - stamp;
+    if (work > LIMITER_DEBT_MAX_MS) return interval;
+    if (work > interval) {
+        g_limiter_debt_ms += work - interval;
+        if (g_limiter_debt_ms > LIMITER_DEBT_MAX_MS) g_limiter_debt_ms = LIMITER_DEBT_MAX_MS;
+        return interval;
+    }
+    repay = interval - work;
+    if (repay > g_limiter_debt_ms) repay = g_limiter_debt_ms;
+    g_limiter_debt_ms -= repay;
+    interval -= repay;
+    return interval != 0u ? interval : 1u;
+}
+
 static u32 STDCALL get_retail_limiter_interval(void *engine_pointer) {
     const PacingLayout *pacing;
     i32 signed_multiplier;
@@ -1853,7 +1900,7 @@ static u32 STDCALL get_retail_limiter_interval(void *engine_pointer) {
     if (interval == 0u) interval = 1u;
     log_frame_time_sample((u8 *)engine_pointer, interval, multiplier);
     monitor_frame_pacing(interval);
-    return interval;
+    return repay_limiter_debt(interval);
 }
 
 /*
@@ -2591,28 +2638,40 @@ static void install_shroud_timing(PatchInstaller *installer) {
  * Adaptive client rate. The patch ties game speed to frame counts (frames per
  * logic tick, particle/audio steps per frame, W3D milliseconds per frame...),
  * so if the PC cannot hold the configured rate, the whole game slowed down.
- * The pacing monitor takes each frame's own work (time since the limiter's
- * previous wait ended) over ~0.25 s, trims hitches, and picks the highest
- * rate the PC can sustain (down to 5 FPS). It drops when the work overruns
- * the budget by 10% and rises after half a second of headroom. The change is
- * applied at the start of a logic tick and every rate-dependent value is
- * re-timed, so logic stays at 15 Hz and visuals keep real-time speed.
+ *
+ * CnC3 is CPU-bound on one thread, and a frame's work is its drawing plus
+ * whatever logic phases it ran. Logic costs the same per second at any client
+ * rate (15 ticks of 6 phases); only drawing scales with the rate. So the
+ * monitor records each frame's work (time since the limiter's previous wait
+ * ended, the stock stamp) and how many phases it ran, fits
+ *     work = drawing + phases * phase_cost
+ * over the last second, and predicts the highest rate whose second still
+ * fits: (budget - 90 * phase_cost) / drawing. It drops when the measured load
+ * exceeds 97% (to the rate fitting 90%) and rises when the rate fitting 85%
+ * is higher for half a second. A rise that fails within 3 s leaves a ceiling
+ * that is retried gently. Rate changes apply at the start of a logic tick
+ * and re-time every rate-dependent value.
  */
 enum {
     MIN_ADAPTIVE_FPS = 5,
-    RATE_RAISE_MS = 500,          /* headroom needed this long before rising */
-    PACING_SETTLE_MS = 300,       /* frames ignored after a switch (queues drain) */
+    RATE_RAISE_MS = 1000,         /* low load needed this long before rising */
+    PACING_SETTLE_MS = 300,       /* frames ignored after a switch */
     FAILED_RAISE_MS = 3000,       /* a drop this soon after a rise: the rise failed */
     CEILING_RETRY_MS = 10000,     /* first retry above a failed rate */
     CEILING_RETRY_MAX_MS = 60000,
     PACING_STABLE_MS = 60000,     /* this long without failures resets the retry */
-    PACING_WINDOW_MAX = 64,
-    PACING_WINDOW_MIN = 8,
-    PACING_SKIP_MS = 250
+    PACING_WINDOW_MAX = 512,      /* about two seconds of frames */
+    PACING_WINDOW_MIN = 16,
+    PACING_SKIP_MS = 250,
+    PHASES_PER_SECOND = LOGIC_FPS * LOGIC_PHASE_COUNT
 };
 
-/* Recent frames' work in milliseconds (ring buffer). */
-static u32 g_pacing_samples[PACING_WINDOW_MAX];
+typedef struct PacingSample {
+    u32 work_ms;
+    u32 phases;
+} PacingSample;
+
+static PacingSample g_pacing_samples[PACING_WINDOW_MAX];
 static u32 g_pacing_sample_next;
 static u32 g_pacing_sample_count;
 static u32 g_pacing_headroom_frames;
@@ -2638,6 +2697,7 @@ static void reset_pacing_monitor(void) {
     g_pacing_ceiling = 0;
     g_pacing_ceiling_frames = 0;
     g_pacing_retry_ms = CEILING_RETRY_MS;
+    g_frame_phases = 0;
 }
 
 static u32 frames_for_ms(u32 ms, u32 rate) {
@@ -2664,32 +2724,18 @@ static u32 supported_rate_at_most(double fps) {
     } else if (fps >= LOGIC_FPS) {
         rate = (u32)(fps / LOGIC_FPS) * LOGIC_FPS;
     } else {
-        rate = (u32)fps;
+        rate = fps > 0.0 ? (u32)fps : 0u;
     }
     if (rate < MIN_ADAPTIVE_FPS) rate = MIN_ADAPTIVE_FPS;
     if (rate > target) rate = target;
     return rate;
 }
 
-/* Mean of the middle 60% of the last `count` samples (hitch-proof). */
-static double trimmed_pacing_mean(u32 count) {
-    u32 sorted[PACING_WINDOW_MAX];
-    u32 i;
-    u32 j;
-    u32 first;
-    u32 last;
-    u32 sum = 0;
-
-    for (i = 0; i < count; ++i) {
-        u32 value = g_pacing_samples[(g_pacing_sample_next + PACING_WINDOW_MAX - 1u - i) %
-                                     PACING_WINDOW_MAX];
-        for (j = i; j > 0u && sorted[j - 1u] > value; --j) sorted[j] = sorted[j - 1u];
-        sorted[j] = value;
-    }
-    first = count / 5u;
-    last = count - count / 5u;
-    for (i = first; i < last; ++i) sum += sorted[i];
-    return (double)sum / (double)(last - first);
+/* Highest rate whose second (all logic plus drawing) fits `fraction` of it. */
+static double rate_fitting(double fraction, double drawing_ms, double phase_cost_ms) {
+    double free_ms = 1000.0 * fraction - PHASES_PER_SECOND * phase_cost_ms;
+    if (free_ms <= 0.0) return 0.0;
+    return free_ms / drawing_ms;
 }
 
 /*
@@ -2700,17 +2746,26 @@ static double trimmed_pacing_mean(u32 count) {
 static void monitor_frame_pacing(u32 interval_ms) {
     u32 stamp = *(volatile u32 *)game_address(g_game, g_game->pacing.previous_frame_time_ms);
     u32 work_ms = (u32)timeGetTime() - stamp;
+    u32 phases = g_frame_phases;
     u32 window;
-    double work;
-    double capacity;
-    u32 sustainable;
-    u32 headroom_rate;
+    u32 i;
+    double n;
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    double zero_frames = 0.0;
+    double mean_x;
+    double mean_y;
+    double variance;
+    double phase_cost;
+    double drawing;
+    double load;
+    u32 target_rate;
 
     (void)interval_ms;
+    g_frame_phases = 0;
     if (!g_config->adaptive_fps || g_config->target_fps <= g_retail_visual_fps) return;
     /* Loading stalls say nothing about the frame rate the game can hold. */
     if (work_ms > PACING_SKIP_MS) return;
-    /* After a switch, let queued frames drain before judging again. */
+    /* After a switch, let the new schedule settle before judging again. */
     if (g_pacing_settle_frames != 0u) {
         --g_pacing_settle_frames;
         return;
@@ -2726,57 +2781,96 @@ static void monitor_frame_pacing(u32 interval_ms) {
             g_pacing_ceiling_frames = frames_for_ms(g_pacing_retry_ms, next);
         }
     }
-    g_pacing_samples[g_pacing_sample_next] = work_ms;
+    g_pacing_samples[g_pacing_sample_next].work_ms = work_ms;
+    g_pacing_samples[g_pacing_sample_next].phases = phases;
     g_pacing_sample_next = (g_pacing_sample_next + 1u) % PACING_WINDOW_MAX;
     if (g_pacing_sample_count < PACING_WINDOW_MAX) ++g_pacing_sample_count;
     ++g_pacing_frames_since_raise;
 
-    /* About a quarter of a second of frames. */
-    window = g_rate / 4u;
+    /* Judge over two seconds of frames, once one second is in. */
+    window = 2u * g_rate;
     if (window < PACING_WINDOW_MIN) window = PACING_WINDOW_MIN;
     if (window > PACING_WINDOW_MAX) window = PACING_WINDOW_MAX;
-    if (g_pacing_sample_count < window) return;
-    work = trimmed_pacing_mean(window);
-    capacity = 1000.0 / (work > 0.5 ? work : 0.5);
+    if (g_pacing_sample_count < window / 2u) return;
+    if (window > g_pacing_sample_count) window = g_pacing_sample_count;
+
+    for (i = 0; i < window; ++i) {
+        const PacingSample *sample = &g_pacing_samples[
+            (g_pacing_sample_next + PACING_WINDOW_MAX - 1u - i) % PACING_WINDOW_MAX];
+        double x = (double)sample->phases;
+        double y = (double)sample->work_ms;
+        if (sample->phases == 0u) zero_frames += 1.0;
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+    }
+    n = (double)window;
+    mean_x = sx / n;
+    mean_y = sy / n;
+    variance = sxx / n - mean_x * mean_x;
+    /*
+     * The two costs separate reliably only with plenty of frames both with
+     * and without logic (the high-rate schedule). Otherwise (stock schedules
+     * run logic every frame) treat all work as scaling with the rate.
+     */
+    phase_cost = 0.0;
+    if (variance >= 0.15 && zero_frames >= 0.15 * n && zero_frames <= 0.85 * n) {
+        phase_cost = (sxy / n - mean_x * mean_y) / variance;
+        if (phase_cost < 0.0) phase_cost = 0.0;
+        /* Logic can't take more than 90% of the measured work. */
+        if (phase_cost * PHASES_PER_SECOND > 0.9 * mean_y * (double)g_rate) {
+            phase_cost = 0.9 * mean_y * (double)g_rate / PHASES_PER_SECOND;
+        }
+    }
+    drawing = mean_y - phase_cost * mean_x;
+    if (drawing < 0.3) drawing = 0.3;
+    /* Share of each second this rate actually uses. */
+    load = mean_y * (double)g_rate / 1000.0;
 
     /*
-     * Drop only when the work clearly overruns this rate's frame budget; an
-     * external cap at the same rate makes the work fill the budget exactly.
+     * Drop only on sustained overload (two seconds over 100%); shorter bursts
+     * are repaid by the limiter. Never more than halve the rate in one step.
      */
-    if (work > 1.10 * 1000.0 / (double)g_rate) {
-        sustainable = supported_rate_at_most(capacity * 0.95);
-        if (sustainable < g_rate) {
+    if (load > 1.00) {
+        target_rate = supported_rate_at_most(rate_fitting(0.90, drawing, phase_cost));
+        if (target_rate < g_rate / 2u) {
+            target_rate = supported_rate_at_most((double)g_rate / 2.0);
+        }
+        if (target_rate < g_rate) {
             if (g_pacing_frames_since_raise < frames_for_ms(FAILED_RAISE_MS, g_rate) &&
                 g_pacing_rate_before_raise != 0u && g_pacing_rate_before_raise < g_rate) {
-                /*
-                 * The last rise could not hold (e.g. the GPU, not the CPU, is
-                 * the limit, which the CPU-side work only shows at that rate).
-                 * Go back to the rate that held and stay at or below it.
-                 */
-                g_pacing_ceiling = g_pacing_rate_before_raise > sustainable
-                                       ? g_pacing_rate_before_raise : sustainable;
+                /* The last rise could not hold: go back and cap rises there. */
+                g_pacing_ceiling = g_pacing_rate_before_raise > target_rate
+                                       ? g_pacing_rate_before_raise : target_rate;
                 g_pacing_ceiling_frames = frames_for_ms(g_pacing_retry_ms, g_pacing_ceiling);
                 if (g_pacing_retry_ms < CEILING_RETRY_MAX_MS) g_pacing_retry_ms *= 2u;
-                if (sustainable < g_pacing_ceiling) sustainable = g_pacing_ceiling;
+                if (target_rate < g_pacing_ceiling) target_rate = g_pacing_ceiling;
                 g_pacing_rate_before_raise = 0;
             }
-            log_printf("Adaptive pacing: frame work %.2f ms over the %u FPS budget; drop to %u",
-                       work, g_rate, sustainable);
-            switch_pacing_rate(sustainable);
+            log_printf("Adaptive pacing: logic %.2f ms/tick, drawing %.2f ms/frame, load %.0f%% "
+                       "at %u FPS; drop to %u",
+                       phase_cost * LOGIC_PHASE_COUNT, drawing, load * 100.0, g_rate, target_rate);
+            switch_pacing_rate(target_rate);
             return;
         }
     }
-    headroom_rate = supported_rate_at_most(capacity * 0.90);
-    if (g_pacing_ceiling != 0u && headroom_rate > g_pacing_ceiling) {
-        headroom_rate = supported_rate_at_most((double)g_pacing_ceiling);
+    /* Rise after a second of clearly low load; at most 1.5x per step. */
+    target_rate = supported_rate_at_most(rate_fitting(0.85, drawing, phase_cost));
+    if (target_rate > (u32)(g_rate * 3u / 2u)) {
+        target_rate = supported_rate_at_most((double)g_rate * 1.5);
     }
-    if (headroom_rate > g_rate) {
+    if (g_pacing_ceiling != 0u && target_rate > g_pacing_ceiling) {
+        target_rate = supported_rate_at_most((double)g_pacing_ceiling);
+    }
+    if (target_rate > g_rate && load < 0.75) {
         if (++g_pacing_headroom_frames >= frames_for_ms(RATE_RAISE_MS, g_rate)) {
-            log_printf("Adaptive pacing: frame work %.2f ms leaves headroom; raise %u to %u",
-                       work, g_rate, headroom_rate);
+            log_printf("Adaptive pacing: logic %.2f ms/tick, drawing %.2f ms/frame, load %.0f%% "
+                       "at %u FPS; raise to %u",
+                       phase_cost * LOGIC_PHASE_COUNT, drawing, load * 100.0, g_rate, target_rate);
             g_pacing_rate_before_raise = g_rate;
             g_pacing_frames_since_raise = 0;
-            switch_pacing_rate(headroom_rate);
+            switch_pacing_rate(target_rate);
         }
     } else {
         g_pacing_headroom_frames = 0;
@@ -3267,6 +3361,7 @@ void game_patches_reset_state(void) {
         g_audio_update_accumulator = g_config->target_fps - g_retail_visual_fps;
         g_w3d_time_remainder = 0;
         g_limiter_interval_remainder = 0;
+        g_limiter_debt_ms = 0;
         g_limiter_interval_divisor = 0;
         /* Drawables from a previous session may share addresses with new ones. */
         memset(g_physics_cache, 0, sizeof(g_physics_cache));

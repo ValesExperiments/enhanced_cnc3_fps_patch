@@ -156,6 +156,17 @@ Fix or remove anything that turns out to be wrong.
   `sync_retail_frame`). Frame "work" seen by the CPU includes waiting in
   Present only when the GPU is the bottleneck, so it can't show GPU headroom:
   remember failed rises as a ceiling and probe gently (monitor round 3).
+  In practice CnC3 is **CPU-bound on one thread** (GPU barely used); heavy
+  scenes (7 AIs) have expensive logic phases. Logic cost per second is fixed,
+  so the monitor separates it from drawing cost (regression on phases per
+  frame), and the limiter repays time lost to overrun frames (round 4).
+  **That regression is only trustworthy with real phase-count variance**
+  (the high-rate schedule's zero-logic frames). In stock schedules (≤90 FPS)
+  it is ill-conditioned: at 75 FPS it once claimed "logic 178 ms/tick,
+  drawing 0.3 ms" and dropped to 5 FPS. So gate the fit, fall back to
+  "everything scales with the rate", and limit any single step (round 5:
+  never below half, at most 1.5× up). Simulate monitor changes in temp/
+  before shipping (temp/model_sim5.py).
   `g_config->target_fps <= 30` stays only as the
   "patch active" guard. The game's integer rate globals must never go below
   15 (stock code divides by `clientFPS/15`).

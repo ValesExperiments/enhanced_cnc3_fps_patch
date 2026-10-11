@@ -96,7 +96,13 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
   if needed, lowers the effective rate to what the PC can sustain, re-timing
   everything (logic schedule, animations, particles, audio, camera). Below
   15 FPS each frame runs several logic ticks. It rises again when there's
-  headroom. Simulated: 100–101% speed from 157 down to ~8 FPS.
+  headroom. It now tells the game's logic cost (same at any frame rate)
+  from drawing cost and computes the right rate directly, and the limiter
+  repays time lost to heavy logic frames. It judges over 2 seconds, drops
+  only on sustained overload (never more than halfway at once) and rises
+  only after a second of clearly low load, so short hitches no longer cause
+  big drops. The game's own heavy-logic hitches (7 AIs) remain, as in
+  vanilla.
 - **F1:** Above 90 FPS some frames must run no logic at all. A new
   scheduler gives each 15 Hz logic tick 10 or 11 frames (160 FPS: 11, 11,
   10), runs its six logic phases spread across them (phase 1 on the first
