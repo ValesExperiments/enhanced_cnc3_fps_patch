@@ -1030,6 +1030,36 @@ static BOOL resolve_selection_panel_sites(
                &panel->single_unit_update_vtable_entry);
 }
 
+/*
+ * FXParticleSystem::DefaultDrawModule::Draw: global "rendering disabled"
+ * checks, then storage iteration reading each particle position at +0x10.
+ */
+static const u16 g_particle_default_draw_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x44,
+    0x80, 0x3D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00,
+    0x53, 0x56, 0x8B, 0xF1, 0x57, 0x89, 0x75, 0xBC,
+    0x0F, 0x85, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x80, 0x3D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00,
+    0x0F, 0x85, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x83, 0xB8, 0x68
+};
+
+static BOOL resolve_particle_draw_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    ParticleDrawLayout *draw = &game->particle_draw;
+    static const u8 ret_0c[] = { 0xC2, 0x0C, 0x00 };
+
+    if (!FIND_UNIQUE(module, nt, g_particle_default_draw_pattern,
+                     &draw->default_draw_function) ||
+        draw->default_draw_function > game->pe_size_of_image - 0x37Cu ||
+        memcmp(module + draw->default_draw_function + 0x379u, ret_0c, sizeof(ret_0c)) != 0) {
+        return FALSE;
+    }
+    return find_unique_readonly_pointer(
+        module, nt, (u32)(uintptr_t)(module + draw->default_draw_function),
+        &draw->default_draw_vtable_entry);
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -1185,6 +1215,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_drawable_physics_sites(module, nt, &game) ||
         !resolve_drawable_interpolation_sites(module, nt, &game) ||
         !resolve_selection_panel_sites(module, nt, &game) ||
+        !resolve_particle_draw_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

@@ -21,6 +21,8 @@ static float g_camera_shake_decay;
 static u32 g_retail_visual_fps = 30u;
 /* Fractional-rate state is reset whenever a game session starts. */
 static u32 g_particle_update_accumulator;
+/* Number of 30 Hz CPU particle simulation steps run so far. */
+static u32 g_particle_sim_tick;
 static u32 g_w3d_time_remainder;
 static u32 g_audio_update_accumulator;
 static u32 g_limiter_interval_remainder;
@@ -447,8 +449,142 @@ static void THISCALL update_particles_at_retail_rate(void *manager) {
     g_particle_update_accumulator += g_retail_visual_fps;
     if (g_particle_update_accumulator >= target_fps) {
         g_particle_update_accumulator -= target_fps;
+        ++g_particle_sim_tick;
         update(manager);
     }
+}
+
+/*
+ * CPU particles (DefaultDrawModule) are simulated at the retail 30 Hz, so
+ * drawn as-is they move in 30 Hz steps. While a system is drawn, each
+ * particle's position is temporarily replaced by a blend of its positions
+ * from the previous and the latest 30 Hz step, then restored, so simulation
+ * never sees the blended values. The blend lags one step (33 ms), like
+ * Drawable interpolation.
+ *
+ * Particles live in pools, so an address can be reused by a new particle.
+ * The remaining-life counter (decremented once per step) tells them apart.
+ */
+typedef int(THISCALL *ParticleDrawFn)(void *draw_module, void *a, void *b, void *c);
+typedef u32(THISCALL *ParticleStorageCountFn)(void *storage);
+typedef u8 *(THISCALL *ParticleStorageGetFn)(void *storage, u32 index);
+
+enum {
+    PARTICLE_CACHE_SIZE = 16384, /* power of two */
+    PARTICLE_CACHE_PROBES = 16,
+    PARTICLE_DRAW_MAX = 4096
+};
+
+typedef struct ParticleCacheEntry {
+    u8 *particle;
+    u32 tick;
+    u32 life;
+    float previous[3];
+    float current[3];
+} ParticleCacheEntry;
+
+static ParticleDrawFn g_original_particle_draw;
+static ParticleCacheEntry g_particle_cache[PARTICLE_CACHE_SIZE];
+static float *g_particle_restore_position[PARTICLE_DRAW_MAX];
+static float g_particle_restore_value[PARTICLE_DRAW_MAX][3];
+
+static ParticleCacheEntry *find_particle_entry(u8 *particle, BOOL *is_new) {
+    u32 hash = (u32)(((uintptr_t)particle >> 3) * 2654435761u);
+    ParticleCacheEntry *reusable = NULL;
+    u32 probe;
+
+    for (probe = 0; probe < PARTICLE_CACHE_PROBES; ++probe) {
+        ParticleCacheEntry *entry =
+            &g_particle_cache[(hash + probe) & (PARTICLE_CACHE_SIZE - 1u)];
+        if (entry->particle == particle) {
+            *is_new = FALSE;
+            return entry;
+        }
+        /* Entries not refreshed for two steps belong to dead or culled particles. */
+        if (reusable == NULL &&
+            (entry->particle == NULL || g_particle_sim_tick - entry->tick > 2u)) {
+            reusable = entry;
+        }
+    }
+    if (reusable != NULL) reusable->particle = particle;
+    *is_new = TRUE;
+    return reusable;
+}
+
+static void track_particle(ParticleCacheEntry *entry, BOOL is_new,
+                           const float *position, u32 life) {
+    u32 tick = g_particle_sim_tick;
+    /* Same particle: life unchanged within a step, or one less per step. */
+    BOOL continues = !is_new && (entry->life == life || entry->life == life + 1u);
+
+    if (!continues) {
+        memcpy(entry->previous, position, sizeof(entry->previous));
+    } else if (entry->tick != tick) {
+        if (entry->tick + 1u == tick) {
+            memcpy(entry->previous, entry->current, sizeof(entry->previous));
+        } else {
+            memcpy(entry->previous, position, sizeof(entry->previous));
+        }
+    }
+    memcpy(entry->current, position, sizeof(entry->current));
+    entry->tick = tick;
+    entry->life = life;
+}
+
+static int THISCALL draw_particles_interpolated(void *draw_module, void *a, void *b, void *c) {
+    u8 *system = *(u8 **)((u8 *)draw_module + PARTICLE_DRAW_MODULE_SYSTEM);
+    void *storage;
+    void **vtable;
+    ParticleStorageGetFn get_particle;
+    float alpha;
+    u32 count;
+    u32 saved = 0;
+    u32 i;
+    int result;
+
+    if (system == NULL || g_config->target_fps <= g_retail_visual_fps) {
+        return g_original_particle_draw(draw_module, a, b, c);
+    }
+    storage = *(void **)(system + PARTICLE_SYSTEM_STORAGE);
+    if (storage == NULL) return g_original_particle_draw(draw_module, a, b, c);
+
+    vtable = *(void ***)storage;
+    count = ((ParticleStorageCountFn)vtable[PARTICLE_STORAGE_COUNT_SLOT])(storage);
+    get_particle = (ParticleStorageGetFn)vtable[PARTICLE_STORAGE_GET_SLOT];
+    if (count > PARTICLE_DRAW_MAX) count = PARTICLE_DRAW_MAX;
+    /* Fraction of the current 30 Hz step that has elapsed. */
+    alpha = (float)g_particle_update_accumulator / (float)g_config->target_fps;
+
+    for (i = 0; i < count; ++i) {
+        u8 *particle = get_particle(storage, i);
+        ParticleCacheEntry *entry;
+        float *position;
+        BOOL is_new;
+        u32 k;
+
+        if (particle == NULL) continue;
+        entry = find_particle_entry(particle, &is_new);
+        if (entry == NULL) continue;
+        position = (float *)(particle + PARTICLE_POSITION);
+        track_particle(entry, is_new, position,
+                       *(u32 *)(particle + PARTICLE_LIFE_REMAINING));
+
+        g_particle_restore_position[saved] = position;
+        memcpy(g_particle_restore_value[saved], position, sizeof(g_particle_restore_value[saved]));
+        ++saved;
+        for (k = 0; k < 3; ++k) {
+            position[k] = entry->previous[k] +
+                          (entry->current[k] - entry->previous[k]) * alpha;
+        }
+    }
+
+    result = g_original_particle_draw(draw_module, a, b, c);
+
+    for (i = 0; i < saved; ++i) {
+        memcpy(g_particle_restore_position[i], g_particle_restore_value[i],
+               sizeof(g_particle_restore_value[i]));
+    }
+    return result;
 }
 
 /*
@@ -1108,6 +1244,14 @@ static void install_particle_and_cursor_timing(PatchInstaller *installer) {
                  &visual->particle_simulation, 0xE8,
                  particle_patch, sizeof(particle_patch));
 
+    {
+        void *draw = game_address(g_game, g_game->particle_draw.default_draw_function);
+        g_original_particle_draw = (ParticleDrawFn)draw;
+        patch_pointer(installer, "CPU particle DefaultDrawModule draw vtable entry",
+                      g_game->particle_draw.default_draw_vtable_entry, draw,
+                      (const void *)draw_particles_interpolated);
+    }
+
     expect_bytes(installer, "GPU particle expiry instruction",
                  visual->gpu_particle_fps_instruction,
                  gpu_opcode, sizeof(gpu_opcode));
@@ -1404,6 +1548,7 @@ void game_patches_reset_state(void) {
         memset(g_physics_cache, 0, sizeof(g_physics_cache));
         /* Each session may follow a new vehicle for the motion diagnostic. */
         g_motion_drawable = NULL;
+        memset(g_particle_cache, 0, sizeof(g_particle_cache));
         g_frame_times_logged = 0;
         reset_keyboard_clock();
         /* First direct reader gets floor(990/FPS); the hook distributes remainder. */

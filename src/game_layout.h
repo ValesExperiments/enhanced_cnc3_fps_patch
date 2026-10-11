@@ -117,6 +117,12 @@ typedef struct DrawableInterpolationLayout {
     u32 window_immediates[2];
 } DrawableInterpolationLayout;
 
+typedef struct ParticleDrawLayout {
+    /* FXParticleSystem::DefaultDrawModule draw (CPU particles) and its vtable slot. */
+    u32 default_draw_function;
+    u32 default_draw_vtable_entry;
+} ParticleDrawLayout;
+
 typedef struct SelectionPanelLayout {
     /*
      * TacticalSelectionDetailsPanelImpl::SetUnitName (forwards only changed
@@ -179,6 +185,7 @@ typedef struct GameLayout {
     DrawablePhysicsLayout drawable_physics;
     DrawableInterpolationLayout drawable_interpolation;
     SelectionPanelLayout selection_panel;
+    ParticleDrawLayout particle_draw;
 } GameLayout;
 
 typedef enum GameResolveResult {
@@ -222,6 +229,18 @@ enum {
     APT_PLAYER_FORCE_TICK = 0x01E9,
     /* APT gadget "OnInitialized has run" flag, e.g. in the selection panel. */
     APT_GADGET_INITIALIZED = 0x14,
+    /*
+     * FXParticleSystem: draw module -> ParticleSystem (+0x04) -> storage
+     * module (+0x84, virtual count/get at slots 5/6). Particle position and
+     * remaining life (decremented once per 30 Hz simulation step).
+     */
+    PARTICLE_DRAW_MODULE_SYSTEM = 0x04,
+    PARTICLE_SYSTEM_STORAGE = 0x84,
+    PARTICLE_STORAGE_COUNT_SLOT = 5,
+    PARTICLE_STORAGE_GET_SLOT = 6,
+    PARTICLE_POSITION = 0x10,
+    PARTICLE_LIFE_REMAINING = 0x40,
+
     /* SingleUnitModeHandler -> SelectionDetails::PanelImpl -> panel gadget. */
     SELECTION_HANDLER_PANEL = 0x14,
     SELECTION_PANEL_GADGET = 0x14,

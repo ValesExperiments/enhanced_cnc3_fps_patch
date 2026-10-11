@@ -354,7 +354,8 @@ smoother VRR output (±1 ms jitter today). F1 needs this anyway.
 
 ## B6. Selection panel sometimes shows "Unit name"
 
-**Status:** fix implemented (2026-10-11). It still needs an in-game test.
+**Status:** fixed. Fix 3 (forced APT tick per panel step) was confirmed in-game on
+2026-10-11.
 
 Evidence: two screenshots of the same Barracks, 4 s apart. One shows
 "Barracks" and the other the placeholder "Unit Name", both with the correct
@@ -437,67 +438,53 @@ The per-frame `UnitName` re-send (fix 2) is kept. Static writes are now 36.
 
 ## B3. Particles still run at 30 Hz
 
-### Symptom
-Particle effects (smoke, fire, explosions, weapon trails) update in visible
-30 Hz steps while everything else is smooth.
+**Status:** CPU particle interpolation implemented (2026-10-11). It still
+needs an in-game test.
 
-### Relevant existing code
-- `update_particles_at_retail_rate` deliberately gates
-  `ParticleSystemManager::UpdateForClientFrame` (CPU particle simulation) to
-  exactly 30 calls/s. W3D buffer preparation still runs every client frame.
-  So particles are *drawn* at full rate but their positions only *change* at
-  30 Hz.
-- GPU particles already compute their state in the shader from W3D time (30
-  fps time domain), so they are likely already smooth. This needs checking.
-- Tracers use the synthetic 30 Hz frame, so they are stepped in the same way.
+### What kinds of particles exist (EA XML: 968 FXParticleSystemTemplates)
+| Type | Systems | Moves via |
+|---|---|---|
+| `GPU_PARTICLE` (Gpu draw) | 694 | vertex shader, analytically from `Time` |
+| default / CPU (Default draw) | 176 | CPU simulation, 30 Hz (patch gate) |
+| `TRAIL` | 45 | CPU |
+| `DRAWABLE` (RenderObject draw) | 39 | CPU |
+| `STREAK` (Streak/Lightning) / `SWARM` | 14 | CPU |
 
-### Why the original author stopped here
-Particle modules apply per-frame deltas (velocity, drag, color/alpha/size
-keys, lifetime decrement, emission counts) without a dt. Making each module
-variable-step means rewriting each one.
+- **GPU particles** (`Shaders/GpuParticle.fx`): `age = Time*30 - CreationFrame`,
+  position/size/rotation from closed-form damping integrals. With the W3D
+  clock advancing every client frame (patch), they already move smoothly.
+  Only their *emission* happens in 30 Hz batches (the emitter runs in the
+  gated simulation step).
+- **CPU particles** (`Shaders/CPUParticle.fx`) get final positions from the
+  CPU, so they visibly step at 30 Hz.
 
-### Approach options
-1. **Render-time interpolation (preferred).** Keep the 30 Hz simulation
-   (lifetimes, emission and spawn counts stay exact). For each particle,
-   remember its position (and possibly size/alpha) at the previous simulation
-   step. When the W3D render buffers are filled every client frame, draw
-   `lerp(prev, curr, α)`, where α is the fraction of the 30 Hz step that has
-   elapsed (taken from the same Bresenham accumulator that gates the
-   simulation).
-   - Pros: exact retail behaviour, smooth motion, contained in one hook site
-     (buffer fill) plus a snapshot before each simulation step.
-   - Cons: adds up to one 30 Hz step (33 ms) of visual latency to particles
-     only. Particles attached to fast-moving units may appear to trail
-     slightly. Needs storage for the previous position: either a spare field
-     in the particle struct or a side table keyed by particle pointer/index.
-   - Newly spawned particles have no previous sample, so use α=1 or prev=curr.
-     Dead particles simply vanish, as they do now.
-2. **Render-time extrapolation.** Draw `curr + velocity * α * step`. No added
-   latency and no extra storage if velocity is in the struct, but it overshoots
-   on drag/bounce and is wrong for non-ballistic modules.
-3. **Full variable-step simulation.** Correct in principle, but it means
-   rewriting every particle module and its emission rules. Out of scope unless
-   options 1 and 2 fail.
+### Engine facts (TW 1.10 VAs)
+- `ParticleSystemManager::UpdateForClientFrame` (0x5B929E) is the gated
+  30 Hz simulation (`update_particles_at_retail_rate`), called from the W3D
+  manager's per-frame update (0x835ECB).
+- `DefaultPhysicsParticleModule` per-particle step (0x5B3C05): `vel += accel;
+  vel *= damping; pos += drift + vel` (no time step).
+- Particle layout: `+0x04` velocity, `+0x10` position, `+0x1C` spawn position,
+  `+0x28` lifetime, `+0x40` remaining life (−1 per step;
+  `CPUParticle::update` 0x5B5837).
+- `DefaultDrawModule::Draw` (0x5AEA1A, `RET 0xC`, vtable slot 7 at
+  0xA7C7F0): system = module+4; storage = system+0x84; count/get = storage
+  vtable +0x14/+0x18; reads positions at particle+0x10 and batches them into
+  W3D point groups. KW 1.03 is identical (0x6153C4).
 
-Secondary concern: emitters on moving objects spawn particles at 30 Hz
-positions, so trails "clump" in steps. Smoothing this would mean spreading the
-spawn positions along the emitter's path within the step. This is optional
-follow-up work.
+### Fix (implemented)
+The `DefaultDrawModule::Draw` vtable entry is redirected to
+`draw_particles_interpolated`. Per draw, each particle's true position is
+tracked in a 16384-entry side table keyed by pointer (the life counter
+detects pool reuse; a 30 Hz step counter from the gate tells new steps
+apart). The drawn position is temporarily set to `lerp(previous, current, α)`
+with `α = particle accumulator / targetFPS`, and restored after the stock draw.
+Size/colour/alpha keys still step at 30 Hz. Verified offline on all four
+builds; static writes are now 37.
 
-### Investigation plan
-- Find the particle struct layout (position, velocity, previous-position or
-  spare fields) and the CPU particle → W3D buffer copy loop that runs every
-  client frame. Ghidra, starting from the existing `particle_simulation` hook
-  site and `W3DParticleSystemManager`.
-- Confirm whether GPU particles are smooth already. If they are, the work is
-  limited to CPU particles.
-- Decide whether tracers should get the same treatment.
-
-### Done when
-At 90 FPS (and higher), CPU particle motion looks continuous. Particle
-lifetimes, counts and timings still match stock 30 FPS. Multiplayer CRC is
-unaffected (particles are client-side only, so this must be verified, not
-assumed).
+### Not covered yet
+Trail, Streak/Lightning, Swarm and RenderObject draw modules; 30 Hz emission
+batching of continuous streams (all types, including GPU).
 
 ---
 
