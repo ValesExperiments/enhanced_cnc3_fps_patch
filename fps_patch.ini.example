@@ -16,3 +16,7 @@ debug_motion_frames=0
 ; Diagnostic: log this many frames of frame-pacing data (per game session)
 ; to fps_patch.log (requires logging=1). 0 = off.
 debug_frame_times=0
+
+; Diagnostic: log this many trail-particle draws (per game session) to
+; fps_patch.log (requires logging=1). 0 = off.
+debug_trail_draws=0

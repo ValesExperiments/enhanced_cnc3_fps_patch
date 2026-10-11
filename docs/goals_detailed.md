@@ -547,6 +547,60 @@ still 30 Hz.
   += velocity`. During the draw each record's position is temporarily set to
   `position + velocity × α` and restored afterwards. Static writes are now 48.
 
+### User feedback (round 4): sparks (implemented, needs a test)
+Swarms confirmed. Still at 30 Hz: **repair-drone sparks**
+(`GDIRepairDroneSparks`: `Type="TRAIL"`, `TrailLife="3"`, lifetime 1–10,
+velocity 5–10/step).
+- TW 1.10: `TrailSystemStorage_Update` (0x5C09EA) per step either pushes
+  the head particle's point (live; `FUN_005BB06B` is a plain `push_back`) or
+  pops one from the front (particle dead, or system stopping: `+0x170`). The
+  trim to TrailLife happens **in the draw**: `TrailDrawModule_Draw`
+  (0x5BB4D3) first calls `FUN_005B6B07(TrailLife)`, which pops live trails
+  down to TrailLife points. Point = position, width (+0x0C), colour (+0x10).
+  The vertex builder (0x5BA171) only uses each point's own fields (V is
+  normalised by the count), so an extra point is harmless.
+- So each step the oldest point vanished, and a 3-point spark jumped as a
+  whole even though its front grew smoothly.
+- **Fix:** during the wrapped draw, TrailLife (module data `+0x10 → +4`) is
+  raised by one, keeping the point about to be dropped. That oldest point
+  slides toward the next by α when it will go next step (live trail at full
+  length, dead, or stopping). The head only grows while the particle is alive
+  (previously a draining trail's head also moved back each step). Position
+  and width are blended; restored after the draw. The resolver asserts the
+  trim call at draw +0x34 and the storage update's shape. No new patch
+  writes.
+- **Round 5:** drone sparks confirmed smooth. The **vehicle repair sparks**
+  are a separate system: the drone's `HealFX="FX_Repair"` plays
+  `HealingFlash` (GPU) and `HealingSparks` (TRAIL, TrailLife 3,
+  SystemLifetime 20, lifetime 2–10, no gravity, damping 0.3–0.85) on the
+  repaired unit. They go through the same update loop and trail draw (the
+  system's transform comes from the unit's interpolated transform but is
+  used only for emission; particles and trails are in world space). The
+  difference: they barely move after the first step and fade white→black in
+  2–10 steps. A point's packed colour (+0x10, includes alpha) is fixed when
+  it's pushed, so brightness stepped at 30 Hz. The blended ends now also
+  blend colour per byte, with a separate integer restore list (colours aren't
+  routed through floats).
+- Selection flash (B9) confirmed fixed.
+- **Round 6 (measured):** colour blending changed nothing. A
+  `debug_trail_draws` log (2026-10-11, Mammoth repaired near a War
+  Factory) showed the HealingSparks system (`at=(0,0,0)`, FX-list system
+  with world-space particles) *is* blended: heads grow and tails slide per
+  frame while alive. Every trail system is drawn twice per frame (harmless).
+  The fault was at **death**. The step that kills a particle still pushes the
+  final head point; afterwards the trail drains one point per step and is no
+  longer trimmed. Our code then stopped growing the head (head jumped
+  forward one step) and slid the tail from the extra point kept for live
+  trails (tail jumped back one step). HealingSparks spawn 2–3 sparks per step
+  and live 2–10 steps, so deaths are constant → 30 Hz look. Drone sparks
+  burst only every 10–30 steps, so it was rare there.
+- **Fix:** a 4096-entry history keyed by particle pointer records the death
+  tick and whether the live trail was full (held the extra point). On the
+  death step the head keeps growing to its final point. While draining, the
+  extra point is folded onto the sliding tail; when only it and the head are
+  left, they collapse (vanilla shows nothing then). A live sighting resets
+  the entry (pool reuse); the table is cleared per session.
+
 ### Not covered yet
 30 Hz emission batching of continuous streams (all types, including GPU
 particles).
@@ -656,7 +710,7 @@ DLL, so it's left alone.
 
 ## B9. Selection flash plays too fast
 
-**Status:** implemented 2026-10-11, needs an in-game test.
+**Status:** done, confirmed 2026-10-11.
 
 ### Root cause (TW 1.10 VAs; KW identical)
 The white "selected" flash is a `TintEnvelope` (0x50 bytes): `+0x04`
@@ -699,7 +753,8 @@ The selection flash looks the same length as at 30 FPS, but fades smoothly.
 
 ## B8. Secondary-object animations sped up
 
-**Status:** investigating.
+**Status:** closed 2026-10-11. The user found the Pitbull pods behave the
+same in vanilla. Notes kept for reference.
 
 User report: "secondary objects" animate too fast, e.g. the **Pitbull's
 rocket pods** have an abnormally fast idle animation.

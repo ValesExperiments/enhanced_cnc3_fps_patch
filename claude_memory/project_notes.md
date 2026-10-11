@@ -155,6 +155,12 @@ Fix or remove anything that turns out to be wrong.
 - **Check "is it vanilla?" first.** The user is happy to test without the DLL
   at 30 FPS; the smoke pop and the shroud-return shadow blink both turned out
   to be vanilla. Ask early when a symptom might be stock behaviour.
+- Diagnostics in `fps_patch.ini` (all need `logging=1`, 0 = off):
+  `debug_motion_frames`, `debug_frame_times`, `debug_trail_draws` (per
+  trail-system draw: frame, step, blend fraction, emitter position, per-trail
+  point count/alive/life/head). When a fix "does nothing", ask the user for a
+  log run instead of guessing again (the trail log found the spark-death jump
+  in one run).
 - Branch scans: a function's callers can include tail `JMP`s (E9), not only
   `CALL`s (E8). Ghidra reports both as calls.
 

@@ -4,6 +4,7 @@
 #include "memory_patch.h"
 
 #include <math.h>
+#include <stdio.h>
 
 /*
  * Hook callbacks cannot carry user data, so they retain the immutable game
@@ -21,6 +22,8 @@ static float g_camera_shake_decay;
 static u32 g_retail_visual_fps = 30u;
 /* Fractional-rate state is reset whenever a game session starts. */
 static u32 g_particle_update_accumulator;
+/* Elapsed fraction of the current 30 Hz particle step; frozen while paused. */
+static float g_particle_blend_fraction;
 /* Number of 30 Hz CPU particle simulation steps run so far. */
 static u32 g_particle_sim_tick;
 static u32 g_w3d_time_remainder;
@@ -434,6 +437,17 @@ static u8 THISCALL calc_physics_xform_interpolated(void *drawable, float *info) 
     return 1;
 }
 
+static BOOL particles_simulate(void) {
+    const ParticleDrawLayout *draw = &g_game->particle_draw;
+    const u8 *game_client = *(const u8 *const *)game_address(
+        g_game, g_game->drawable_physics.game_client_pointer);
+    const u8 *game_logic = *(const u8 *const *)game_address(g_game, draw->game_logic_pointer);
+
+    return game_client != NULL && game_logic != NULL &&
+           game_client[draw->client_simulates_offset] != 0 &&
+           game_logic[draw->logic_paused_offset] == 0;
+}
+
 static void THISCALL update_particles_at_retail_rate(void *manager) {
     SubsystemUpdateFn update;
     u32 target_fps = g_config->target_fps;
@@ -451,6 +465,13 @@ static void THISCALL update_particles_at_retail_rate(void *manager) {
         g_particle_update_accumulator -= target_fps;
         ++g_particle_sim_tick;
         update(manager);
+    }
+    /*
+     * While particles are not simulated (e.g. the game is paused), drawing
+     * keeps the last fraction; a cycling one made particles oscillate.
+     */
+    if (particles_simulate()) {
+        g_particle_blend_fraction = (float)g_particle_update_accumulator / (float)target_fps;
     }
 }
 
@@ -592,7 +613,7 @@ static int draw_particles_interpolated(u32 kind, void *draw_module,
     get_particle = (ParticleStorageGetFn)vtable[PARTICLE_STORAGE_GET_SLOT];
     if (count > PARTICLE_DRAW_MAX) count = PARTICLE_DRAW_MAX;
     /* Fraction of the current 30 Hz step that has elapsed. */
-    alpha = (float)g_particle_update_accumulator / (float)g_config->target_fps;
+    alpha = g_particle_blend_fraction;
 
     for (i = 0; i < count; ++i) {
         u8 *particle = get_particle(storage, i);
@@ -686,7 +707,7 @@ static int THISCALL draw_swarm_interpolated(void *module, void *a, void *b, void
     storage = *(u8 **)(system + PARTICLE_SYSTEM_STORAGE);
     if (storage == NULL) return original(module, a, b, c);
 
-    alpha = (float)g_particle_update_accumulator / (float)g_config->target_fps;
+    alpha = g_particle_blend_fraction;
     record = *(u8 **)(storage + SWARM_STORAGE_RECORDS_BEGIN);
     end = *(u8 **)(storage + SWARM_STORAGE_RECORDS_END);
     for (; record != NULL && record < end && drawn < SWARM_DRAW_MAX &&
@@ -841,48 +862,298 @@ static float *trail_point(const u8 *record, u32 index) {
                      (offset - block * TRAIL_POINTS_PER_BLOCK) * TRAIL_POINT_SIZE);
 }
 
+/*
+ * The tail moves in 30 Hz steps too: each step a live trail gains a point and
+ * the draw trims it back to TrailLife points, and a dead (or stopping) trail
+ * loses its oldest point. Short trails such as repair-drone sparks
+ * (TrailLife 3) therefore jumped as a whole. During the draw TrailLife is
+ * raised by one, so the point about to be dropped is still there, and the
+ * oldest point slides toward the next one by the elapsed fraction. Live
+ * trails keep their visible length; the head only grows while alive.
+ */
+enum { TRAIL_COLOUR_RESTORE_MAX = 2 * 4096 };
+static u32 *g_trail_colour_restore_field[TRAIL_COLOUR_RESTORE_MAX];
+static u32 g_trail_colour_restore_value[TRAIL_COLOUR_RESTORE_MAX];
+
+static u32 blend_packed_colour(u32 from, u32 to, float alpha) {
+    u32 result = 0;
+    u32 shift;
+
+    for (shift = 0; shift < 32u; shift += 8u) {
+        float a = (float)((from >> shift) & 0xFFu);
+        float b = (float)((to >> shift) & 0xFFu);
+        result |= (u32)(a + (b - a) * alpha + 0.5f) << shift;
+    }
+    return result;
+}
+
+/* Trail point: position, width, packed colour (TRAIL_POINT_SIZE bytes). */
+typedef struct TrailPoint {
+    float position[3];
+    float width;
+    u32 colour;
+} TrailPoint;
+_Static_assert(sizeof(TrailPoint) == TRAIL_POINT_SIZE, "trail point layout");
+
+static void blend_trail_point(TrailPoint *point, const TrailPoint *from,
+                              const TrailPoint *toward, float alpha,
+                              u32 *saved, u32 *colours_saved) {
+    float *fields[4];
+    float from_values[4];
+    float toward_values[4];
+    u32 k;
+
+    for (k = 0; k < 3; ++k) {
+        fields[k] = &point->position[k];
+        from_values[k] = from->position[k];
+        toward_values[k] = toward->position[k];
+    }
+    fields[3] = &point->width;
+    from_values[3] = from->width;
+    toward_values[3] = toward->width;
+    for (k = 0; k < 4; ++k) {
+        g_particle_restore_field[*saved] = fields[k];
+        g_particle_restore_value[*saved] = *fields[k];
+        ++*saved;
+        *fields[k] = from_values[k] + (toward_values[k] - from_values[k]) * alpha;
+    }
+    /* Colours are packed integers, so they are saved and blended as such. */
+    g_trail_colour_restore_field[*colours_saved] = &point->colour;
+    g_trail_colour_restore_value[*colours_saved] = point->colour;
+    ++*colours_saved;
+    point->colour = blend_packed_colour(from->colour, toward->colour, alpha);
+}
+
+/*
+ * When a trail's particle dies, the step that kills it still adds the final
+ * head point; afterwards the trail drains one point per step and is no longer
+ * trimmed. Telling "died this step" from "draining" (and whether the trail
+ * still holds the extra point kept for the live tail) needs history, so each
+ * trail particle is tracked by pointer. Pool reuse is caught because a live
+ * sighting clears the dead state.
+ */
+enum {
+    TRAIL_HISTORY_SIZE = 4096, /* power of two */
+    TRAIL_HISTORY_PROBES = 16
+};
+
+typedef struct TrailHistoryEntry {
+    u8 *particle;
+    u32 seen_tick;
+    u32 death_tick;
+    BOOL dead;
+    /* Live: window is full (holds the extra point). Dead: still holds it. */
+    BOOL full;
+    BOOL extra;
+} TrailHistoryEntry;
+
+static TrailHistoryEntry g_trail_history[TRAIL_HISTORY_SIZE];
+
+/* Snapshot of one trail's visible points while they are re-placed. */
+enum { TRAIL_CURVE_MAX = 256 };
+static TrailPoint g_trail_curve[TRAIL_CURVE_MAX];
+
+static TrailHistoryEntry *track_trail(u8 *particle, BOOL alive, u32 window, u32 retail_life) {
+    u32 hash = (u32)(((uintptr_t)particle >> 3) * 2654435761u);
+    u32 tick = g_particle_sim_tick;
+    TrailHistoryEntry *entry = NULL;
+    TrailHistoryEntry *reusable = NULL;
+    u32 probe;
+
+    if (particle == NULL) return NULL;
+    for (probe = 0; probe < TRAIL_HISTORY_PROBES; ++probe) {
+        TrailHistoryEntry *candidate =
+            &g_trail_history[(hash + probe) & (TRAIL_HISTORY_SIZE - 1u)];
+        if (candidate->particle == particle) {
+            entry = candidate;
+            break;
+        }
+        if (reusable == NULL &&
+            (candidate->particle == NULL || tick - candidate->seen_tick > 2u)) {
+            reusable = candidate;
+        }
+    }
+    if (entry == NULL) {
+        if (reusable == NULL) return NULL;
+        entry = reusable;
+        memset(entry, 0, sizeof(*entry));
+        entry->particle = particle;
+        /* First seen already dead: only a full trail's death step adds a point. */
+        if (!alive) {
+            entry->dead = TRUE;
+            entry->extra = window == retail_life + 2u;
+            entry->death_tick = entry->extra ? tick : tick - 1u;
+        }
+    }
+    if (alive) {
+        entry->dead = FALSE;
+        entry->full = window == retail_life + 1u;
+    } else if (!entry->dead) {
+        entry->dead = TRUE;
+        entry->death_tick = tick;
+        entry->extra = entry->full;
+    }
+    entry->seen_tick = tick;
+    return entry;
+}
+
+/*
+ * Diagnostic (debug_trail_draws > 0): one line per trail-system draw with
+ * the client frame, 30 Hz step and blend fraction, the system's emitter
+ * position (tells systems apart), and for up to four trails: point count,
+ * whether the particle is alive, remaining life, and the head before/after
+ * blending.
+ */
+static u32 g_trail_draws_logged;
+
+static void log_trail_draw(const u8 *system, float alpha, u32 retail_life,
+                           BOOL stopping, u32 records, const char *details) {
+    void *game_client = *(void **)game_address(
+        g_game, g_game->drawable_physics.game_client_pointer);
+    const float *position = (const float *)(system + 0x14);
+
+    log_printf("trail frame=%u tick=%u a=%.3f sys=%p at=(%.1f,%.1f,%.1f) life=%u "
+               "stop=%d recs=%u%s",
+               game_client != NULL ? read_client_frame(game_client) : 0u,
+               g_particle_sim_tick, alpha, (const void *)system, position[0],
+               position[1], position[2], retail_life, stopping ? 1 : 0, records, details);
+}
+
 static int THISCALL draw_trails_interpolated(void *module, void *a, void *b, void *c) {
     ParticleDrawFn original = g_original_particle_draw[PARTICLE_DRAW_TRAIL];
     u8 *system = *(u8 **)((u8 *)module + PARTICLE_DRAW_MODULE_SYSTEM);
+    u8 *module_data = *(u8 **)((u8 *)module + TRAIL_DRAW_MODULE_DATA);
     u8 *storage;
+    u8 **particles;
     u8 *record;
     u8 *end;
+    u32 *trail_life;
+    u32 retail_life;
+    BOOL stopping;
     float alpha;
     u32 saved = 0;
+    u32 colours_saved = 0;
+    u32 index;
     int result;
+    BOOL logging;
+    char details[512];
+    size_t details_length = 0;
 
-    if (system == NULL || g_config->target_fps <= g_retail_visual_fps) {
+    if (system == NULL || module_data == NULL ||
+        g_config->target_fps <= g_retail_visual_fps) {
         return original(module, a, b, c);
     }
     storage = *(u8 **)(system + PARTICLE_SYSTEM_STORAGE);
     if (storage == NULL) return original(module, a, b, c);
 
-    alpha = (float)g_particle_update_accumulator / (float)g_config->target_fps;
+    alpha = g_particle_blend_fraction;
+    trail_life = (u32 *)(module_data + TRAIL_DATA_LIFE);
+    retail_life = *trail_life;
+    stopping = system[PARTICLE_SYSTEM_STOPPING] != 0;
+    particles = *(u8 ***)(storage + TRAIL_STORAGE_PARTICLES);
     record = *(u8 **)(storage + TRAIL_STORAGE_RECORDS_BEGIN);
     end = *(u8 **)(storage + TRAIL_STORAGE_RECORDS_END);
-    for (; record != NULL && record < end && saved + 3u <= PARTICLE_RESTORE_MAX;
-         record += TRAIL_RECORD_SIZE) {
+    logging = g_config->debug_trail_draws != 0 &&
+              g_trail_draws_logged < g_config->debug_trail_draws &&
+              record != NULL && record < end;
+    details[0] = '\0';
+    for (index = 0; record != NULL && record < end && particles != NULL;
+         record += TRAIL_RECORD_SIZE, ++index) {
+        u8 *particle = particles[index];
         u32 count = trail_point_count(record);
-        float *newest;
-        float *previous;
-        u32 k;
+        BOOL alive = particle != NULL && *(u32 *)(particle + PARTICLE_LIFE_REMAINING) != 0;
+        TrailHistoryEntry *history;
+        u32 drawn_first = 0;
+        u32 drawn;
+        u32 first;
+        u32 points;
+        float start;
+        float finish;
+        BOOL tail_slides;
+        BOOL head_grows;
+        u32 j;
 
-        if (count < 2u) continue;
-        newest = trail_point(record, count - 1u);
-        previous = trail_point(record, count - 2u);
-        for (k = 0; k < 3; ++k) {
-            g_particle_restore_field[saved] = &newest[k];
-            g_particle_restore_value[saved] = newest[k];
-            ++saved;
-            newest[k] = previous[k] + (newest[k] - previous[k]) * alpha;
+        /* Live trails beyond TrailLife + 1 points are trimmed by the draw. */
+        if (alive && count > retail_life + 1u) drawn_first = count - (retail_life + 1u);
+        drawn = count - drawn_first;
+        history = track_trail(particle, alive, drawn, retail_life);
+        if (drawn < 2u) continue;
+        /*
+         * A dead trail that was full still holds the point the stock trim
+         * would have removed; it is drawn but not part of the visible curve.
+         */
+        first = drawn_first;
+        if (!alive && history != NULL && history->extra) ++first;
+        points = count - first;
+        if (points > TRAIL_CURVE_MAX) continue;
+        if (saved + drawn * 4u > PARTICLE_RESTORE_MAX ||
+            colours_saved + drawn > TRAIL_COLOUR_RESTORE_MAX) {
+            break;
+        }
+        /* The oldest point goes next step: trimmed (live, full) or drained. */
+        tail_slides = !alive || stopping || drawn == retail_life + 1u;
+        head_grows = !stopping &&
+                     (alive || (history != NULL && history->death_tick == g_particle_sim_tick));
+
+        /*
+         * Visible curve, in 30 Hz steps along the stored points: the tail
+         * slides off its oldest point and the head grows into its newest by
+         * the elapsed fraction. Every drawn point is re-placed evenly along
+         * it, because the stock draw maps the texture by point index; moving
+         * only the ends made the texture jump once per step.
+         */
+        for (j = 0; j < points; ++j) {
+            memcpy(&g_trail_curve[j], trail_point(record, first + j), sizeof(TrailPoint));
+        }
+        start = tail_slides && points >= 2u ? alpha : 0.0f;
+        finish = (float)(points - 1u);
+        if (head_grows && points >= 2u) finish -= 1.0f - alpha;
+        if (finish < start) finish = start;
+        for (j = 0; j < drawn; ++j) {
+            float u = start + (finish - start) * (float)j / (float)(drawn - 1u);
+            u32 k = (u32)u;
+            TrailPoint *point = (TrailPoint *)trail_point(record, drawn_first + j);
+            if (points < 2u) {
+                blend_trail_point(point, &g_trail_curve[0], &g_trail_curve[0], 0.0f,
+                                  &saved, &colours_saved);
+                continue;
+            }
+            if (k > points - 2u) k = points - 2u;
+            blend_trail_point(point, &g_trail_curve[k], &g_trail_curve[k + 1u], u - (float)k,
+                              &saved, &colours_saved);
+        }
+        if (logging && index < 4u && details_length < sizeof(details) - 128u) {
+            const TrailPoint *head = (const TrailPoint *)trail_point(record, count - 1u);
+            int written = snprintf(
+                details + details_length, sizeof(details) - details_length,
+                " | n=%u live=%d l=%u u=%.2f..%.2f head=(%.1f,%.1f,%.1f)->(%.1f,%.1f,%.1f)",
+                count, alive ? 1 : 0,
+                particle != NULL ? *(u32 *)(particle + PARTICLE_LIFE_REMAINING) : 0u,
+                start, finish, g_trail_curve[points - 1u].position[0],
+                g_trail_curve[points - 1u].position[1], g_trail_curve[points - 1u].position[2],
+                head->position[0], head->position[1], head->position[2]);
+            if (written > 0) details_length += (size_t)written;
         }
     }
+    if (logging) {
+        log_trail_draw(system, alpha, retail_life, stopping,
+                       (u32)((end - *(u8 **)(storage + TRAIL_STORAGE_RECORDS_BEGIN)) /
+                             TRAIL_RECORD_SIZE),
+                       details);
+        ++g_trail_draws_logged;
+    }
 
+    *trail_life = retail_life + 1u;
     result = original(module, a, b, c);
+    *trail_life = retail_life;
 
     while (saved != 0) {
         --saved;
         *g_particle_restore_field[saved] = g_particle_restore_value[saved];
+    }
+    while (colours_saved != 0) {
+        --colours_saved;
+        *g_trail_colour_restore_field[colours_saved] = g_trail_colour_restore_value[colours_saved];
     }
     return result;
 }
@@ -2271,6 +2542,7 @@ void game_patches_reset_state(void) {
     if (g_config != NULL) {
         /* Seed so particle simulation runs on the first client frame of a session. */
         g_particle_update_accumulator = g_config->target_fps - g_retail_visual_fps;
+        g_particle_blend_fraction = 0.0f;
         /* Seed so audio service runs before the first logic-phase slice. */
         g_audio_update_accumulator = g_config->target_fps - g_retail_visual_fps;
         g_w3d_time_remainder = 0;
@@ -2285,6 +2557,8 @@ void game_patches_reset_state(void) {
         g_fog_smoothed_source = NULL;
         g_shroud_cells = NULL;
         g_frame_times_logged = 0;
+        g_trail_draws_logged = 0;
+        memset(g_trail_history, 0, sizeof(g_trail_history));
         reset_keyboard_clock();
         /* First direct reader gets floor(990/FPS); the hook distributes remainder. */
         *(u32 *)game_address(g_game, g_game->timing.w3d_milliseconds_per_frame) =

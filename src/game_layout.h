@@ -134,6 +134,15 @@ typedef struct ParticleDrawLayout {
      */
     u32 draw_functions[PARTICLE_DRAW_KINDS];
     u32 draw_vtable_entries[PARTICLE_DRAW_KINDS];
+    /*
+     * ParticleSystemManager::UpdateForClientFrame only simulates systems
+     * while "GameClient byte [client offset] != 0 && GameLogic byte [logic
+     * offset] == 0" (the latter is the pause flag). The GameLogic global and
+     * both byte offsets.
+     */
+    u32 game_logic_pointer;
+    u32 client_simulates_offset;
+    u32 logic_paused_offset;
 } ParticleDrawLayout;
 
 typedef struct TracerLayout {
@@ -351,6 +360,17 @@ enum {
     TRAIL_RECORD_SIZE = 0x28,
     TRAIL_POINT_SIZE = 0x14,
     TRAIL_POINTS_PER_BLOCK = 6,
+    /*
+     * Point: position, width (+0x0C), packed colour (+0x10). Trail draw module data
+     * (+0x10) holds TrailLife (+4): live trails are trimmed to that many
+     * points at the start of each draw. Storage +0x10 lists each record's
+     * particle; system +0x170 set means the system is stopping (all trails
+     * drain one point per step).
+     */
+    TRAIL_DRAW_MODULE_DATA = 0x10,
+    TRAIL_DATA_LIFE = 0x04,
+    TRAIL_STORAGE_PARTICLES = 0x10,
+    PARTICLE_SYSTEM_STOPPING = 0x170,
     /*
      * Swarm storage (Scrin Buzzers): 0x1C-byte records at storage +0x10..+0x14:
      * position, velocity (+0x0C), life. Each 30 Hz step: velocity +=

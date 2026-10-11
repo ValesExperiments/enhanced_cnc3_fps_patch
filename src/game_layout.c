@@ -1076,6 +1076,28 @@ static const u16 g_particle_trail_draw_pattern[] = {
     0x8B, 0x88, 0x84, 0x00, 0x00, 0x00, 0x8B, 0x01, 0x56, 0x57, 0xFF
 };
 
+/*
+ * Particle manager update: MOV EAX,[GameClient]; CMP byte [EAX+d32],0; JZ;
+ * MOV EAX,[GameLogic]; CMP byte [EAX+d32],0; MOV byte [EBP-1],1; JZ; MOV 0.
+ */
+static const u16 g_particle_simulates_pattern[] = {
+    0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x80, 0xB8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00, 0x74, 0x12,
+    0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x80, 0xB8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00,
+    0xC6, 0x45, 0xFF, 0x01, 0x74, 0x04, 0xC6, 0x45, 0xFF, 0x00
+};
+
+/* Trail draw +0x34: MOV EAX,[EBX+10h]; PUSH [EAX+4] (TrailLife); MOV ECX,ESI; CALL trim. */
+static const u8 g_trail_draw_trim_call[] = {
+    0x8B, 0x43, 0x10, 0xFF, 0x70, 0x04, 0x8B, 0xCE, 0xE8
+};
+/* TrailSystemStorage::update: system +0x170 stopping flag, records, particles. */
+static const u16 g_trail_storage_update_pattern[] = {
+    0x8B, 0x46, 0x04, 0x85, 0xC0, 0x57, 0x75, 0x05, 0xB8, 0xEF, 0xBE, 0xAD, 0xBA,
+    0x80, 0xB8, 0x70, 0x01, 0x00, 0x00, 0x00, 0x8B, 0x6E, 0x1C, 0x8D, 0x5E, 0x10, 0x8B, 0x3B
+};
+
 /* Swarm draw: "swarms enabled" flag, one-time init, then vertex build. */
 static const u16 g_particle_swarm_draw_pattern[] = {
     0x53, 0x33, 0xDB, 0x38, 0x1D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
@@ -1117,7 +1139,25 @@ static BOOL resolve_particle_draw_sites(
         }
         draw->draw_functions[i] = function;
     }
-    return TRUE;
+    /*
+     * The trail wrapper relies on: the draw trimming each live trail to its
+     * module data's TrailLife (+0x10 -> +4) before drawing, and the storage
+     * update's stopping flag (system +0x170), particle list (+0x10) and
+     * records (+0x1C).
+     */
+    if (memcmp(module + draw->draw_functions[PARTICLE_DRAW_TRAIL] + 0x34u,
+               g_trail_draw_trim_call, sizeof(g_trail_draw_trim_call)) != 0 ||
+        !FIND_UNIQUE(module, nt, g_trail_storage_update_pattern, &i) ||
+        !FIND_UNIQUE(module, nt, g_particle_simulates_pattern, &i) ||
+        load_u32(module + i + 1u) !=
+            (u32)(uintptr_t)(module + game->drawable_physics.game_client_pointer) ||
+        !read_absolute_rva(module, game->pe_size_of_image, i + 15u,
+                           &draw->game_logic_pointer)) {
+        return FALSE;
+    }
+    draw->client_simulates_offset = load_u32(module + i + 7u);
+    draw->logic_paused_offset = load_u32(module + i + 21u);
+    return draw->client_simulates_offset < 0x1000u && draw->logic_paused_offset < 0x1000u;
 }
 
 /* W3DTracerManager update: "if (GameClient frame == +0x90) return". */

@@ -7,6 +7,7 @@ void config_set_defaults(Config *config) {
     config->logging = TRUE;
     config->debug_motion_frames = 0;
     config->debug_frame_times = 0;
+    config->debug_trail_draws = 0;
 }
 
 BOOL config_load(Config *config, const wchar_t *path) {
@@ -29,5 +30,7 @@ BOOL config_load(Config *config, const wchar_t *path) {
         L"fps_patch", L"debug_motion_frames", config->debug_motion_frames, path);
     config->debug_frame_times = GetPrivateProfileIntW(
         L"fps_patch", L"debug_frame_times", config->debug_frame_times, path);
+    config->debug_trail_draws = GetPrivateProfileIntW(
+        L"fps_patch", L"debug_trail_draws", config->debug_trail_draws, path);
     return TRUE;
 }
