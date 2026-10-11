@@ -123,6 +123,7 @@ enum ParticleDrawKind {
     PARTICLE_DRAW_LIGHTNING,
     PARTICLE_DRAW_RENDER_OBJECT,
     PARTICLE_DRAW_TRAIL,
+    PARTICLE_DRAW_SWARM,
     PARTICLE_DRAW_KINDS
 };
 
@@ -156,6 +157,31 @@ typedef struct CameraEaseLayout {
     u32 limit_operands[2];
     u32 accel_operands[2];
 } CameraEaseLayout;
+
+enum ShroudTextureKind {
+    SHROUD_TEXTURE_SHROUD, /* 16-bit cells, client +0x198 */
+    SHROUD_TEXTURE_FOG,    /* 32-bit cells, client +0x19C */
+    SHROUD_TEXTURE_KINDS
+};
+
+typedef struct ShroudFadeSite {
+    /* The per-frame texture upload's call of its time-based cell fade. */
+    BranchSite fade_call;
+    /*
+     * The fade's static last-timeGetTime stamp, its float levels-per-ms rate
+     * and its per-call step cap. The step is truncated while the stamp
+     * advances by the full elapsed time, so short frames lose the fraction.
+     */
+    u32 timestamp;
+    u32 rate;
+    u32 step_cap;
+} ShroudFadeSite;
+
+typedef struct ShroudLayout {
+    ShroudFadeSite fades[SHROUD_TEXTURE_KINDS];
+    /* The fog upload's per-row memcpy(dst, cells + row, width * 4). */
+    BranchSite fog_row_copy_call;
+} ShroudLayout;
 
 typedef struct SelectionPanelLayout {
     /*
@@ -222,6 +248,7 @@ typedef struct GameLayout {
     ParticleDrawLayout particle_draw;
     TracerLayout tracers;
     CameraEaseLayout camera_ease;
+    ShroudLayout shroud;
 } GameLayout;
 
 typedef enum GameResolveResult {
@@ -286,10 +313,28 @@ enum {
     TRAIL_RECORD_SIZE = 0x28,
     TRAIL_POINT_SIZE = 0x14,
     TRAIL_POINTS_PER_BLOCK = 6,
+    /*
+     * Swarm storage (Nod Buzzers): 0x1C-byte records at storage +0x10..+0x14:
+     * position, velocity (+0x0C), life. Each 30 Hz step: velocity +=
+     * attraction; position += velocity.
+     */
+    SWARM_STORAGE_RECORDS_BEGIN = 0x10,
+    SWARM_STORAGE_RECORDS_END = 0x14,
+    SWARM_RECORD_SIZE = 0x1C,
+    SWARM_RECORD_VELOCITY = 0x0C,
+    SWARM_DRAW_MAX = 0x100,
 
     /* W3DTracerManager last processed frame; tracer speed per 30 Hz frame. */
     TRACER_MANAGER_LAST_FRAME = 0x90,
     TRACER_INSTANCE_SPEED = 0x58,
+
+    /*
+     * Shroud texture object (both kinds): cell grid width/height and the
+     * CPU-side cell buffer the per-frame upload copies row by row.
+     */
+    SHROUD_WIDTH = 0x00,
+    SHROUD_HEIGHT = 0x04,
+    SHROUD_CELLS = 0x18,
 
     /* SingleUnitModeHandler -> SelectionDetails::PanelImpl -> panel gadget. */
     SELECTION_HANDLER_PANEL = 0x14,

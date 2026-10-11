@@ -1076,6 +1076,14 @@ static const u16 g_particle_trail_draw_pattern[] = {
     0x8B, 0x88, 0x84, 0x00, 0x00, 0x00, 0x8B, 0x01, 0x56, 0x57, 0xFF
 };
 
+/* Swarm draw: "swarms enabled" flag, one-time init, then vertex build. */
+static const u16 g_particle_swarm_draw_pattern[] = {
+    0x53, 0x33, 0xDB, 0x38, 0x1D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x56, 0x8B, 0xF1, 0x75, 0x04, 0x33, 0xC0, 0xEB, 0x77, 0x38, 0x5E, 0x18, 0x75, 0x0C,
+    0x8D, 0x4E, 0x14, 0x8B, 0x01, 0xFF, 0x50, 0x04, 0xC6, 0x46, 0x18, 0x01,
+    0x39, 0x5E, 0x20, 0x74, 0xE6
+};
+
 static BOOL resolve_particle_draw_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     static const struct {
@@ -1090,7 +1098,8 @@ static BOOL resolve_particle_draw_sites(
         { g_particle_lightning_draw_pattern, ARRAY_COUNT(g_particle_lightning_draw_pattern), 0x585u, 0x585u },
         { g_particle_render_object_draw_pattern,
           ARRAY_COUNT(g_particle_render_object_draw_pattern), 0x4F3u, 0x4F0u },
-        { g_particle_trail_draw_pattern, ARRAY_COUNT(g_particle_trail_draw_pattern), 0x112u, 0x112u }
+        { g_particle_trail_draw_pattern, ARRAY_COUNT(g_particle_trail_draw_pattern), 0x112u, 0x112u },
+        { g_particle_swarm_draw_pattern, ARRAY_COUNT(g_particle_swarm_draw_pattern), 0x8Bu, 0x8Bu }
     };
     static const u8 ret_0c[] = { 0xC2, 0x0C, 0x00 };
     ParticleDrawLayout *draw = &game->particle_draw;
@@ -1231,6 +1240,117 @@ static BOOL resolve_camera_ease_sites(
         ease->accel_operands[i] = blocks[i] + 36u;
     }
     return TRUE;
+}
+
+/*
+ * Per-frame shroud texture uploads (TW 1.10 VA 0x834BF4 / 0x834D47): call
+ * the time-based cell fade, then lock the texture and copy the cell rows.
+ * The two share everything up to the row copy, whose scale (2 or 4 bytes
+ * per cell) tells them apart. The fade CALL is at +3; the copy CALL at +86.
+ */
+#define SHROUD_UPLOAD_PREFIX                                                       \
+    0x50, 0x8B, 0xCE, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,   \
+    0x80, 0x7E, 0x35, 0x00, 0x74, 0x14, 0x8D, 0x45, PATTERN_ANY, 0x50,             \
+    0x0F, 0xB6, 0x46, 0x36, 0x50, 0x8B, 0xCE, 0xC6, 0x46, 0x35, 0x00,             \
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,                     \
+    0x8B, 0x45, PATTERN_ANY, 0x8B, 0x7E, 0x18, 0x40, 0x50, 0x43, 0x53,             \
+    0x6A, 0x01, 0x6A, 0x01, 0x8D, 0x45, PATTERN_ANY, 0x50, 0x8D, 0x4D, PATTERN_ANY, \
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,                     \
+    0x8B, 0xD8, 0x8B, 0x45, PATTERN_ANY, 0x85, 0xC0, 0x89, 0x45, PATTERN_ANY,     \
+    0x7E, PATTERN_ANY, 0x8B, 0x45, PATTERN_ANY
+static const u16 g_shroud_upload_pattern[] = {
+    SHROUD_UPLOAD_PREFIX,
+    0x03, 0xC0, 0x89, 0x45, PATTERN_ANY, 0xFF, 0x75, PATTERN_ANY, 0x57, 0x53,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x03, 0x5D, PATTERN_ANY, 0x8B, 0x06, 0x83, 0xC4, 0x0C, 0xFF, 0x4D, PATTERN_ANY,
+    0x83, 0x7D, PATTERN_ANY, 0x00, 0x8D, 0x3C, 0x47, 0x7F, 0xE2
+};
+static const u16 g_fog_upload_pattern[] = {
+    SHROUD_UPLOAD_PREFIX,
+    0xC1, 0xE0, 0x02, 0x89, 0x45, PATTERN_ANY, 0xFF, 0x75, PATTERN_ANY, 0x57, 0x53,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x03, 0x5D, PATTERN_ANY, 0x8B, 0x06, 0x83, 0xC4, 0x0C, 0xFF, 0x4D, PATTERN_ANY,
+    0x83, 0x7D, PATTERN_ANY, 0x00, 0x8D, 0x3C, 0x87, 0x7F, 0xE2
+};
+#undef SHROUD_UPLOAD_PREFIX
+
+/*
+ * Inside each fade: elapsed = timeGetTime() - stamp; stamp += elapsed;
+ * step = ftol(elapsed * rate); if (step > cap) step = cap.
+ * Stamp operands at +7/+19, rate at +41, cap at +54.
+ */
+static const u16 g_shroud_fade_timing_pattern[] = {
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x2B, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x0F, 0x84, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x01, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x85, 0xC0, 0x89, 0x45, PATTERN_ANY, 0xDB, 0x45, PATTERN_ANY, 0x7D, 0x06,
+    0xD8, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xD8, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x89, 0x45, PATTERN_ANY, 0xB8
+};
+
+static BOOL resolve_shroud_fade(u8 *module, u32 image_size, u32 upload,
+                                ShroudFadeSite *fade) {
+    u32 offset;
+    u32 timing = 0;
+    u32 matches = 0;
+    float rate;
+
+    fade->fade_call.instruction = upload + 3u;
+    if (!decode_relative_target(module, image_size, fade->fade_call.instruction,
+                                0xE8, &fade->fade_call.target) ||
+        fade->fade_call.target > image_size - 0x100u) {
+        return FALSE;
+    }
+    /* The timing block sits right after the fade's first-call initialisation. */
+    for (offset = 0; offset < 0x60u; ++offset) {
+        if (pattern_matches(module + fade->fade_call.target + offset,
+                            g_shroud_fade_timing_pattern,
+                            ARRAY_COUNT(g_shroud_fade_timing_pattern))) {
+            timing = fade->fade_call.target + offset;
+            ++matches;
+        }
+    }
+    if (matches != 1 ||
+        load_u32(module + timing + 7u) != load_u32(module + timing + 19u) ||
+        !read_absolute_rva(module, image_size, timing + 7u, &fade->timestamp) ||
+        !read_absolute_rva(module, image_size, timing + 41u, &fade->rate)) {
+        return FALSE;
+    }
+    fade->step_cap = load_u32(module + timing + 54u);
+    memcpy(&rate, module + fade->rate, sizeof(rate));
+    return fade->step_cap >= 1u && fade->step_cap <= 0xFFu &&
+           rate > 0.001f && rate < 10.0f;
+}
+
+static BOOL resolve_shroud_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    ShroudLayout *shroud = &game->shroud;
+    u32 image_size = game->pe_size_of_image;
+    u32 shroud_upload;
+    u32 fog_upload;
+    u32 shroud_copy;
+
+    if (!FIND_UNIQUE(module, nt, g_shroud_upload_pattern, &shroud_upload) ||
+        !FIND_UNIQUE(module, nt, g_fog_upload_pattern, &fog_upload) ||
+        !resolve_shroud_fade(module, image_size, shroud_upload,
+                             &shroud->fades[SHROUD_TEXTURE_SHROUD]) ||
+        !resolve_shroud_fade(module, image_size, fog_upload,
+                             &shroud->fades[SHROUD_TEXTURE_FOG]) ||
+        shroud->fades[SHROUD_TEXTURE_SHROUD].timestamp ==
+            shroud->fades[SHROUD_TEXTURE_FOG].timestamp) {
+        return FALSE;
+    }
+    /* Both row copies call the same memcpy. */
+    shroud->fog_row_copy_call.instruction = fog_upload + 86u;
+    return decode_relative_target(module, image_size, shroud_upload + 85u, 0xE8,
+                                  &shroud_copy) &&
+           decode_relative_target(module, image_size,
+                                  shroud->fog_row_copy_call.instruction, 0xE8,
+                                  &shroud->fog_row_copy_call.target) &&
+           shroud_copy == shroud->fog_row_copy_call.target;
 }
 
 static BOOL resolve_objective_ui_sites(
@@ -1391,6 +1511,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_particle_draw_sites(module, nt, &game) ||
         !resolve_tracer_sites(module, nt, &game) ||
         !resolve_camera_ease_sites(module, nt, &game) ||
+        !resolve_shroud_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

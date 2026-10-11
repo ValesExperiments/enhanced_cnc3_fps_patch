@@ -438,8 +438,10 @@ The per-frame `UnitName` re-send (fix 2) is kept. Static writes are now 36.
 
 ## B3. Particles still run at 30 Hz
 
-**Status:** CPU particle interpolation implemented (2026-10-11). It still
-needs an in-game test.
+**Status:** CPU particles, trails, tracers, Ion Cannon ball and Shockwave
+are confirmed smooth in-game (2026-10-11). Swarm smoothing is implemented and
+needs a test. The remaining smoke pop also happens without the DLL (vanilla
+behaviour), so it's out of scope.
 
 ### What kinds of particles exist (EA XML: 968 FXParticleSystemTemplates)
 | Type | Systems | Moves via |
@@ -533,13 +535,85 @@ smoke disappears "glitchily". Also asked: fix the camera ease in advance.
   four `MOVSS XMM2,[const]` operands are redirected to DLL floats: limit ×
   dt, accel × dt², with dt = 30/targetFPS. Static writes are now 47.
 
-### Not covered yet
-Swarm draw module (2 effects, own vertex buffer); 30 Hz emission batching of
-continuous streams (all types, including GPU particles).
+### User feedback (round 3) and swarm (implemented, needs a test)
+Ion Cannon ball confirmed smooth. Smoke still disappears abruptly, but the
+user saw the same without the DLL, so it's vanilla behaviour and ignored.
+Nothing odd noticed after the camera-ease change. Swarms (Nod Buzzers) were
+still 30 Hz.
 
-Side finding: a camera transition (`CameraTransition_PerFrameAccel_0_03`,
-0x828D30) adds a fixed 0.03 per client frame, so it likely runs 3× faster at
-90 FPS.
+- **Swarm** (`SwarmDrawModule::Draw`, TW 0x5B68B0 / KW 0x61D374, `RET 0xC`
+  at +0x8B). Records (storage +0x10..+0x14, 0x1C bytes) hold position and
+  velocity (+0x0C); each 30 Hz step does `velocity += attraction; position
+  += velocity`. During the draw each record's position is temporarily set to
+  `position + velocity × α` and restored afterwards. Static writes are now 48.
+
+### Not covered yet
+30 Hz emission batching of continuous streams (all types, including GPU
+particles).
+
+---
+
+## B7. Fog of war clears in steps
+
+**Status:** implemented 2026-10-11, needs an in-game test.
+
+### Symptom
+When a unit walks into the shroud, the revealed area clears in visible
+steps ("at 30 FPS") instead of smoothly.
+
+### How the shroud is drawn (TW 1.10 VAs; KW identical)
+The terrain client (`[0xC18940]`) owns two CPU-side cell textures, each
+uploaded every rendered frame from `FUN_00839FB3` (render path
+`FUN_0083B400`):
+
+| Object | Cells | Upload | Fade | Rate | Cap |
+|---|---|---|---|---|---|
+| `+0x198` "shroud" | 16-bit ARGB4444 (`FUN_00813CDD`) | `FUN_00834BF4` | `FUN_00833AB6` | 0.255 levels/ms | 255 |
+| `+0x19C` "fog" | 32-bit (`FUN_00829F0D`) | `FUN_00834D47` | `FUN_00833D05` | 0.064 levels/ms | 128 |
+
+Object layout: `+0x00` width, `+0x04` height, `+0x18` cell buffer, `+0x1C`
+texture, `+0x38` target levels, `+0x3C` shown levels.
+
+- Each upload first runs its **fade**: shown levels move toward target levels
+  by `step = ftol(elapsed_ms × rate)` (truncating), with `elapsed` from
+  `timeGetTime()` and a static stamp that advances by the *whole* elapsed time.
+  Changed cells are rewritten in the cell buffer, then all rows are
+  `memcpy`'d into the locked texture.
+- Logic reports vision changes through a virtual callback (`FUN_008316E9`):
+  the shroud object gets a new target level (and fades). The fog object gets
+  `FUN_00829F0D(x, y, level, 1)`, which writes the cell **directly**, skipping
+  its fade. (The `PUSH 1` left on the stack by `FUN_009E55A2`, `RET 8`,
+  becomes the 4th argument.)
+
+### Root causes
+1. **Fog cells pop.** Logic writes revealed fog cells instantly, so the
+   reveal advances in logic-rate steps.
+2. **Fades lose time at high FPS.** Truncating `elapsed × rate` every frame
+   while the stamp advances fully throws the fraction away. At 90 FPS (11–12
+   ms frames) the fog fade gives `0.70 → 0` almost every frame (it stalls), and
+   the shroud fade gives 2 instead of 2.8 levels/frame (~25% slow). `FUN_009D97D0`
+   uses `CVTTSD2SI` (truncation).
+
+### Fix (implemented)
+- **Fade carry** (both textures): the upload's call of its fade is redirected
+  to a wrapper. After the stock fade runs, the wrapper recomputes the same
+  step and moves the stamp back by the unused milliseconds, so the fraction
+  carries over to the next frame. Fades now run at their authored rate at any
+  FPS. The cap still applies; the first call and long gaps are left alone.
+- **Fog smoothing**: the fog upload's per-row `memcpy` is redirected. Rows
+  are copied from a smoothed copy of the cells instead, where every byte channel
+  moves toward the game's cell by at most `255 × dt / 66 ms` (one logic step
+  for a full-range change). Instant pops become short ramps. The game's own
+  buffer is never modified. It snaps to the game's cells on a new map, a grid
+  size change, or a gap over 250 ms.
+- Resolved by signature: each upload's code from the fade call through the
+  copy loop (the `×2`/`×4` row scale tells them apart). The fade timing block
+  supplies the stamp (both operands must agree), rate and cap. Verified
+  offline on TW 1.10, TW 1.9, KW 1.03 and KW 1.02. Static writes are now 51.
+
+### Done when
+Walking a unit into fog/shroud reveals the area as a smooth wave at 90 FPS,
+with no visible steps; nothing else about the fog's look changes.
 
 ---
 

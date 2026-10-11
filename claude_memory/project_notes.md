@@ -135,6 +135,15 @@ Fix or remove anything that turns out to be wrong.
 - TW and KW differ in some struct offsets (e.g. Object→AI is 0x2E8 in TW and
   0x2F4 in KW). Wildcard such bytes and always run layout_check on all four
   builds: one failing stage disables the whole patch.
+- **Watch for `timeGetTime` + truncation patterns.** Code like `elapsed =
+  now - stamp; stamp += elapsed; step = ftol(elapsed * rate)` (e.g. the
+  shroud fades) is "time-based" but loses the fraction every frame. At high
+  FPS small rates truncate to 0 and stall. `FUN_009D97D0` (TW) is the CRT
+  `_ftol2` and truncates. Fix: move the stamp back by the unused ms.
+- The game's `memcpy` is at RVA 0xA2CE (TW 1.10). Redirecting one specific
+  `CALL memcpy` site is a cheap way to substitute what gets uploaded (used
+  for the fog texture rows).
+- MinGW's `<windows.h>` already defines `CDECL` (empty); use `__cdecl`.
 
 ## Lessons from tooling problems
 - A PyGhidra/JVM process does **not** exit when its MCP client disconnects,

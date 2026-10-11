@@ -24,7 +24,8 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | B4 | All moving vehicles and aircraft should move smoothly (a small stutter is visible at 90 FPS) | **Done** (confirmed 2026-10-11) |
 | B5 | No random small hitches; camera scrolling as smooth as unit movement | **Solved** with our DXVK build (G-Sync works borderless; confirmed 2026-10-11) |
 | B6 | Selected unit/building panel must never show the placeholder name "Unit name" | **Done** (fix 3, confirmed 2026-10-11) |
-| B3 | Particles should move smoothly at the render rate rather than in 30 Hz steps (e.g. by interpolation) | Bullets, trails, shockwaves confirmed; round 3 (Ion Cannon ball, smoke pop, camera ease) **needs in-game test** |
+| B3 | Particles should move smoothly at the render rate rather than in 30 Hz steps (e.g. by interpolation) | CPU particles, bullets, trails, Shockwave and Ion Cannon ball confirmed; swarms (Nod Buzzers) **need in-game test**. Smoke pop is vanilla behaviour (ignored) |
+| B7 | Fog of war / shroud should clear smoothly when units reveal it | Implemented, **needs in-game test** |
 | F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | Not started |
 
 ## Groundwork needed first
@@ -57,8 +58,12 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
   panel's C++ steps; now each state change and button rebuild forces one.
 - **B3:** GPU particles (~72%) were already smooth. CPU particles (position,
   size, colour, fade, rotation), trails and bullet tracers are now drawn blended
-  or moved per frame instead of in 30 Hz steps. Only swarm effects (2) and
-  emission batching remain.
+  or moved per frame instead of in 30 Hz steps. Swarms are now projected
+  forward per frame too. Only 30 Hz emission batching remains.
+- **B7:** Logic writes revealed fog cells straight into the fog texture, so
+  they popped in at the logic rate. The fog texture is now uploaded from a copy
+  that ramps each cell over ~66 ms. Both shroud fades also lost time at high
+  FPS (rounding down every frame); they now carry the remainder over.
 - **F1:** The main blocker is the 6-phase logic scheduler, which caps the
   client-to-logic ratio at 6 (90 FPS). FPS values that aren't multiples of 15,
   such as 144 and 160, also need fractional scheduling and more precise frame

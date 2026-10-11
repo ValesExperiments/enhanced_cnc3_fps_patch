@@ -664,6 +664,55 @@ static int THISCALL draw_render_object_particles(void *module, void *a, void *b,
 }
 
 /*
+ * Swarm particles (Nod Buzzers) keep plain records that the swarm draw turns
+ * into vertices. Each 30 Hz step does "velocity += attraction; position +=
+ * velocity", so while a swarm is drawn each position is temporarily moved
+ * forward by velocity times the elapsed fraction of the next step.
+ */
+static int THISCALL draw_swarm_interpolated(void *module, void *a, void *b, void *c) {
+    ParticleDrawFn original = g_original_particle_draw[PARTICLE_DRAW_SWARM];
+    u8 *system = *(u8 **)((u8 *)module + PARTICLE_DRAW_MODULE_SYSTEM);
+    u8 *storage;
+    u8 *record;
+    u8 *end;
+    float alpha;
+    u32 saved = 0;
+    u32 drawn = 0;
+    int result;
+
+    if (system == NULL || g_config->target_fps <= g_retail_visual_fps) {
+        return original(module, a, b, c);
+    }
+    storage = *(u8 **)(system + PARTICLE_SYSTEM_STORAGE);
+    if (storage == NULL) return original(module, a, b, c);
+
+    alpha = (float)g_particle_update_accumulator / (float)g_config->target_fps;
+    record = *(u8 **)(storage + SWARM_STORAGE_RECORDS_BEGIN);
+    end = *(u8 **)(storage + SWARM_STORAGE_RECORDS_END);
+    for (; record != NULL && record < end && drawn < SWARM_DRAW_MAX &&
+           saved + 3u <= PARTICLE_RESTORE_MAX;
+         record += SWARM_RECORD_SIZE, ++drawn) {
+        float *position = (float *)record;
+        const float *velocity = (const float *)(record + SWARM_RECORD_VELOCITY);
+        u32 k;
+        for (k = 0; k < 3; ++k) {
+            g_particle_restore_field[saved] = &position[k];
+            g_particle_restore_value[saved] = position[k];
+            ++saved;
+            position[k] += velocity[k] * alpha;
+        }
+    }
+
+    result = original(module, a, b, c);
+
+    while (saved != 0) {
+        --saved;
+        *g_particle_restore_field[saved] = g_particle_restore_value[saved];
+    }
+    return result;
+}
+
+/*
  * Tracers (infantry/defence bullets) move by "speed" per 30 Hz frame, and the
  * tracer manager only ran on synthetic 30 Hz frames, so bullets advanced in
  * 30 Hz jumps. The movement/expiry pass now also runs on the client frames in
@@ -783,6 +832,170 @@ static int THISCALL draw_trails_interpolated(void *module, void *a, void *b, voi
         *g_particle_restore_field[saved] = g_particle_restore_value[saved];
     }
     return result;
+}
+
+/*
+ * Fog of war. Two CPU-side cell textures, the shroud (16-bit cells) and the
+ * fog (32-bit cells), are uploaded every client frame. Each upload first runs
+ * a time-based fade that moves changed cells toward their target level, but
+ * its step is ftol(elapsed_ms * rate) while its timestamp advances by the
+ * whole elapsed time, so short frames lose the fraction: at 90 FPS the
+ * shroud fade ran ~25% slow and the fog fade (0.064 levels/ms) truncated to 0
+ * in nearly every frame. Holding back the unused milliseconds keeps the
+ * authored rate at any frame rate.
+ *
+ * Logic also writes vision changes straight into the fog cells, bypassing its
+ * fade, so revealed cells popped in at the logic rate. The fog rows are
+ * uploaded from a smoothed copy whose channels move toward the game's cells
+ * by at most a full range per logic step (66 ms), which turns those pops
+ * into ramps. The game's own cells are never modified.
+ */
+typedef void(THISCALL *ShroudFadeFn)(void *texture, void *arg);
+typedef void *(__cdecl *RowCopyFn)(void *destination, const void *source, size_t size);
+
+enum {
+    FOG_SMOOTH_MILLISECONDS = 1000 / 15,
+    /* Longer gaps (loading, alt-tab) show the game's cells directly. */
+    FOG_SNAP_MILLISECONDS = 250,
+    FOG_MAX_DIMENSION = 4096
+};
+
+static ShroudFadeFn g_original_shroud_fades[SHROUD_TEXTURE_KINDS];
+static RowCopyFn g_original_fog_row_copy;
+/* Set by the fog fade wrapper for the row copies of the same upload. */
+static const u8 *g_fog_cells;
+static u32 g_fog_cell_count;
+static BOOL g_fog_snap;
+static i32 g_fog_max_step;
+static u32 *g_fog_smoothed;
+static u32 g_fog_smoothed_capacity;
+static const u8 *g_fog_smoothed_source;
+static u32 g_fog_smoothed_width;
+static u32 g_fog_smoothed_height;
+static LARGE_INTEGER g_fog_previous_time;
+static LARGE_INTEGER g_fog_frequency;
+
+static void run_shroud_fade(u32 kind, void *texture, void *arg) {
+    const ShroudFadeSite *site = &g_game->shroud.fades[kind];
+    u32 *stamp = (u32 *)game_address(g_game, site->timestamp);
+    float rate = *(const float *)game_address(g_game, site->rate);
+    u32 before = *stamp;
+    u32 elapsed;
+    double exact;
+    u32 step;
+    u32 unused;
+
+    g_original_shroud_fades[kind](texture, arg);
+    elapsed = *stamp - before;
+    /* The first call initialises the stamp; long gaps hit the step cap anyway. */
+    if (before == 0 || elapsed == 0 || elapsed > 1000u) return;
+    /* Same product as the game's x87 FMUL; exact in double for these inputs. */
+    exact = (double)elapsed * (double)rate;
+    step = (u32)exact;
+    if (step >= site->step_cap) return;
+    unused = (u32)((exact - (double)step) / (double)rate + 1e-6);
+    if (unused > elapsed) unused = elapsed;
+    *stamp -= unused;
+}
+
+static void THISCALL fade_shroud_cells(void *texture, void *arg) {
+    run_shroud_fade(SHROUD_TEXTURE_SHROUD, texture, arg);
+}
+
+static void prepare_fog_smoothing(const u8 *texture) {
+    const u8 *cells = *(const u8 *const *)(texture + SHROUD_CELLS);
+    u32 width = *(const u32 *)(texture + SHROUD_WIDTH);
+    u32 height = *(const u32 *)(texture + SHROUD_HEIGHT);
+    LARGE_INTEGER now;
+    double elapsed_ms;
+
+    g_fog_cells = NULL;
+    if (cells == NULL || width == 0 || height == 0 ||
+        width > FOG_MAX_DIMENSION || height > FOG_MAX_DIMENSION) {
+        return;
+    }
+    if (width * height > g_fog_smoothed_capacity) {
+        u32 *grown = (u32 *)HeapAlloc(GetProcessHeap(), 0, width * height * sizeof(u32));
+        if (grown == NULL) return;
+        if (g_fog_smoothed != NULL) HeapFree(GetProcessHeap(), 0, g_fog_smoothed);
+        g_fog_smoothed = grown;
+        g_fog_smoothed_capacity = width * height;
+        g_fog_smoothed_source = NULL;
+    }
+
+    if (g_fog_frequency.QuadPart == 0) QueryPerformanceFrequency(&g_fog_frequency);
+    QueryPerformanceCounter(&now);
+    elapsed_ms = (double)(now.QuadPart - g_fog_previous_time.QuadPart) * 1000.0 /
+                 (double)g_fog_frequency.QuadPart;
+    g_fog_previous_time = now;
+
+    /* A new map (or a different grid) starts from the game's cells. */
+    g_fog_snap = cells != g_fog_smoothed_source || width != g_fog_smoothed_width ||
+                 height != g_fog_smoothed_height || elapsed_ms > FOG_SNAP_MILLISECONDS ||
+                 g_config->target_fps <= g_retail_visual_fps;
+    g_fog_max_step = (i32)(255.0 * elapsed_ms / FOG_SMOOTH_MILLISECONDS + 0.5);
+    if (g_fog_max_step < 1) g_fog_max_step = 1;
+    if (g_fog_max_step >= 255) g_fog_snap = TRUE;
+
+    g_fog_smoothed_width = width;
+    g_fog_smoothed_height = height;
+    g_fog_cells = cells;
+    g_fog_cell_count = width * height;
+}
+
+static void THISCALL fade_fog_cells(void *texture, void *arg) {
+    run_shroud_fade(SHROUD_TEXTURE_FOG, texture, arg);
+    prepare_fog_smoothing((const u8 *)texture);
+}
+
+static u32 approach_fog_cell(u32 shown, u32 target, i32 max_step) {
+    u32 result = 0;
+    u32 shift;
+
+    if (shown == target) return shown;
+    for (shift = 0; shift < 32u; shift += 8u) {
+        i32 from = (i32)((shown >> shift) & 0xFFu);
+        i32 to = (i32)((target >> shift) & 0xFFu);
+        if (to > from + max_step) {
+            from += max_step;
+        } else if (to < from - max_step) {
+            from -= max_step;
+        } else {
+            from = to;
+        }
+        result |= (u32)from << shift;
+    }
+    return result;
+}
+
+static void *__cdecl copy_fog_row_smoothed(void *destination, const void *source,
+                                         size_t size) {
+    const u8 *row = (const u8 *)source;
+    const u32 *cells;
+    u32 *smoothed;
+    u32 first;
+    u32 count;
+    u32 i;
+
+    if (g_fog_cells == NULL || row < g_fog_cells || (size & 3u) != 0 ||
+        ((u32)(row - g_fog_cells) & 3u) != 0) {
+        return g_original_fog_row_copy(destination, source, size);
+    }
+    first = (u32)(row - g_fog_cells) / sizeof(u32);
+    count = (u32)size / sizeof(u32);
+    if (first > g_fog_cell_count || count > g_fog_cell_count - first) {
+        return g_original_fog_row_copy(destination, source, size);
+    }
+
+    /* The upload copies every row, so the copy is complete once row 0 is seen. */
+    if (first == 0) g_fog_smoothed_source = g_fog_cells;
+    cells = (const u32 *)row;
+    smoothed = g_fog_smoothed + first;
+    for (i = 0; i < count; ++i) {
+        smoothed[i] = g_fog_snap ? cells[i]
+                                 : approach_fog_cell(smoothed[i], cells[i], g_fog_max_step);
+    }
+    return g_original_fog_row_copy(destination, smoothed, size);
 }
 
 /*
@@ -1445,6 +1658,32 @@ static void install_tracer_motion(PatchInstaller *installer) {
                  &tracers->tracer_update_call, 0xE8, call_patch, sizeof(call_patch));
 }
 
+static void install_shroud_timing(PatchInstaller *installer) {
+    static const char *const fade_names[SHROUD_TEXTURE_KINDS] = {
+        "shroud texture fade call", "fog texture fade call"
+    };
+    static void *const fade_wrappers[SHROUD_TEXTURE_KINDS] = {
+        (void *)fade_shroud_cells, (void *)fade_fog_cells
+    };
+    const ShroudLayout *shroud = &g_game->shroud;
+    u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
+    u32 kind;
+
+    for (kind = 0; kind < SHROUD_TEXTURE_KINDS; ++kind) {
+        const BranchSite *call = &shroud->fades[kind].fade_call;
+        g_original_shroud_fades[kind] = (ShroudFadeFn)game_address(g_game, call->target);
+        encode_rel32(&call_patch[1], game_address(g_game, call->instruction + 5u),
+                     fade_wrappers[kind]);
+        patch_branch(installer, fade_names[kind], call, 0xE8, call_patch, sizeof(call_patch));
+    }
+    g_original_fog_row_copy = (RowCopyFn)game_address(g_game, shroud->fog_row_copy_call.target);
+    encode_rel32(&call_patch[1],
+                 game_address(g_game, shroud->fog_row_copy_call.instruction + 5u),
+                 copy_fog_row_smoothed);
+    patch_branch(installer, "fog texture row copy call", &shroud->fog_row_copy_call, 0xE8,
+                 call_patch, sizeof(call_patch));
+}
+
 static void install_drawable_physics_timing(PatchInstaller *installer) {
     const DrawablePhysicsLayout *physics = &g_game->drawable_physics;
     u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
@@ -1506,12 +1745,13 @@ static void install_particle_and_cursor_timing(PatchInstaller *installer) {
             "particle StreakDrawModule draw vtable entry",
             "particle LightningDrawModule draw vtable entry",
             "particle RenderObjectDrawModule draw vtable entry",
-            "particle TrailDrawModule draw vtable entry"
+            "particle TrailDrawModule draw vtable entry",
+            "particle SwarmDrawModule draw vtable entry"
         };
         const ParticleDrawFn wrappers[PARTICLE_DRAW_KINDS] = {
             draw_default_particles, draw_streak_particles,
             draw_lightning_particles, draw_render_object_particles,
-            draw_trails_interpolated
+            draw_trails_interpolated, draw_swarm_interpolated
         };
         u32 kind;
         for (kind = 0; kind < PARTICLE_DRAW_KINDS; ++kind) {
@@ -1752,6 +1992,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_drawable_physics_timing(&installer);
     install_tracer_motion(&installer);
     install_camera_ease_timing(&installer);
+    install_shroud_timing(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);
@@ -1822,6 +2063,8 @@ void game_patches_reset_state(void) {
         /* Each session may follow a new vehicle for the motion diagnostic. */
         g_motion_drawable = NULL;
         memset(g_particle_cache, 0, sizeof(g_particle_cache));
+        /* A new session's fog starts from the game's cells. */
+        g_fog_smoothed_source = NULL;
         g_frame_times_logged = 0;
         reset_keyboard_clock();
         /* First direct reader gets floor(990/FPS); the hook distributes remainder. */

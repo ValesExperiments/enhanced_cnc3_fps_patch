@@ -142,6 +142,7 @@ static int check(const char *path) {
         { "particle_draw", resolve_particle_draw_sites },
         { "tracers", resolve_tracer_sites },
         { "camera_ease", resolve_camera_ease_sites },
+        { "shroud", resolve_shroud_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -193,6 +194,18 @@ static int check(const char *path) {
                full.objective_ui.add_indicator_functions[0],
                full.objective_ui.add_indicator_functions[1],
                full.objective_ui.add_indicator_functions[2]);
+        for (u32 k = 0; k < SHROUD_TEXTURE_KINDS; ++k) {
+            const ShroudFadeSite *fade = &full.shroud.fades[k];
+            float rate;
+            memcpy(&rate, module + fade->rate, sizeof(rate));
+            printf("  shroud %s: fade call 0x%X -> 0x%X stamp 0x%X rate %.3f/ms cap %u\n",
+                   k == SHROUD_TEXTURE_FOG ? "fog   " : "shroud",
+                   fade->fade_call.instruction, fade->fade_call.target,
+                   fade->timestamp, rate, fade->step_cap);
+        }
+        printf("  shroud fog row copy call 0x%X -> 0x%X\n",
+               full.shroud.fog_row_copy_call.instruction,
+               full.shroud.fog_row_copy_call.target);
     }
     VirtualFree(module, 0, MEM_RELEASE);
     return result == GAME_RESOLVED ? 0 : 2;
