@@ -1,0 +1,11 @@
+
+__pycache__
+.env/
+draft_data/
+build/
+dist/
+env/
+pyBIG.egg-info/
+tests/test_data/output/*
+test.big
+test.py
