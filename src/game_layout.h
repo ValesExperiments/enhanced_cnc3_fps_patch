@@ -96,6 +96,17 @@ typedef struct VisualLayout {
     u32 retail_frames_per_millisecond;
 } VisualLayout;
 
+typedef struct ObjectiveUiLayout {
+    /* Global AptPlayer* stored by the AptPlayer constructor. */
+    u32 apt_player_pointer;
+    /*
+     * TacticalObjectiveIndicatorStageImpl vtable slots 0..2 and their stock
+     * targets: AddObjectIndicator, AddOffScreenIndicator, AddWaypointIndicator.
+     */
+    u32 add_indicator_vtable_entries[3];
+    u32 add_indicator_functions[3];
+} ObjectiveUiLayout;
+
 typedef struct PacingLayout {
     /* Stock 29 ms presentation wait and GameEngine limiter interval block. */
     u32 display_limiter_branch;
@@ -127,6 +138,7 @@ typedef struct GameLayout {
     CameraInputLayout camera_input;
     VisualLayout visual;
     PacingLayout pacing;
+    ObjectiveUiLayout objective_ui;
 } GameLayout;
 
 typedef enum GameResolveResult {
@@ -161,6 +173,14 @@ enum {
     KEYBOARD_KEY_SEQUENCE_BASE = 0x002C,
     KEYBOARD_KEY_STATE_STRIDE = 8,
     KEYBOARD_INPUT_FRAME = 0x0E28,
+
+    /*
+     * AptPlayer flag: when set, the APT render path first runs one APT update
+     * with at least 34 ms elapsed, so pending ActionScript (OnInitialized)
+     * executes before the frame is drawn.
+     */
+    APT_PLAYER_FORCE_TICK = 0x01E9,
+    ADD_INDICATOR_COUNT = 3,
 
     /* W3DView/CNC3_View virtual slots used by the camera wrappers. */
     W3D_VIEW_SCROLL_BY_SLOT = 0x14,

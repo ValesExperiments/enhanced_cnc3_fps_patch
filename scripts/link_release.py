@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import sys
@@ -14,6 +15,17 @@ def fail(message: str, output: str = "") -> None:
     if output:
         print(output, file=sys.stderr, end="" if output.endswith("\n") else "\n")
     raise SystemExit(1)
+
+
+def split_linker_line(line: str) -> list[str]:
+    if os.name != "nt":
+        return shlex.split(line)
+    # Windows hosts print backslash path separators unescaped, which POSIX
+    # splitting would consume as escape characters.
+    return [
+        arg[1:-1] if len(arg) >= 2 and arg[0] == arg[-1] == '"' else arg
+        for arg in shlex.split(line, posix=False)
+    ]
 
 
 def main() -> None:
@@ -39,7 +51,7 @@ def main() -> None:
     if linker_line is None:
         fail("Zig did not report an lld-link command", probe_output)
 
-    linker_args = shlex.split(linker_line)
+    linker_args = split_linker_line(linker_line)
     if not linker_args or linker_args[0] != "lld-link":
         fail("unexpected linker command", linker_line)
 

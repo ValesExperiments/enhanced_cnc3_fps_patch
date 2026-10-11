@@ -18,7 +18,7 @@
 - All code must be found here in this project folder. This includes libraries, packages, and the likes, they must not be outside this project folder.
 
 # Project specific info
-- This is a fps mod for Command & Conquer 3. The previous person who worked on this implemented 45, 60, 75 and 90 fps. The game normally runs at 120 fps.
+- This is a fps mod for Command & Conquer 3. The previous person who worked on this implemented 45, 60, 75 and 90 fps. The game normally runs at 30 fps.
 - My copy of the game is located at "D:\SteamLibrary\steamapps\common\Command and Conquer 3 Tiberium Wars", you are allowed to inspect and copy files, but you are not allowed to place or modify files/folders in the game's folder.
 
 # Explanation about files and folders inside tools_and_docs_by_user

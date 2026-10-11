@@ -135,6 +135,7 @@ static int check(const char *path) {
         { "audio", resolve_audio_sites },
         { "scheduler", resolve_scheduler_sites },
         { "w3d_clock", resolve_w3d_clock_sites },
+        { "objective_ui", resolve_objective_ui_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -173,6 +174,13 @@ static int check(const char *path) {
                full.visual.particle_simulation.instruction,
                full.visual.anim2d_timestamp_frame_call,
                full.visual.anim2d_update_frame_call);
+        printf("  objective UI: apt_player=0x%X add_indicator vtable=0x%X "
+               "fns=0x%X/0x%X/0x%X\n",
+               full.objective_ui.apt_player_pointer,
+               full.objective_ui.add_indicator_vtable_entries[0],
+               full.objective_ui.add_indicator_functions[0],
+               full.objective_ui.add_indicator_functions[1],
+               full.objective_ui.add_indicator_functions[2]);
     }
     VirtualFree(module, 0, MEM_RELEASE);
     return result == GAME_RESOLVED ? 0 : 2;

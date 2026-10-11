@@ -4,3 +4,12 @@
 /dist/
 /targets/
 /tools/
+
+# Local-only project folders (see CLAUDE.md)
+/temp/
+/game_files/
+/tools_and_docs_by_claude/gitignored/
+/tools_and_docs_by_claude/venv/
+/tools_and_docs_by_claude/zig/
+/tools_and_docs_by_claude/make/
+/tools_and_docs_by_claude/ghidra_data/

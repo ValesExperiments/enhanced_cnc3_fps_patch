@@ -61,7 +61,11 @@ release:
 debug:
 	$(MAKE) MODE=debug build
 
-build: $(OUTPUT)
+build: $(OUTPUT) $(BINDIR)/fps_patch.ini
+
+# Ship the default configuration next to the DLL so zig-out/bin is install-ready.
+$(BINDIR)/fps_patch.ini: fps_patch.ini.example | $(BINDIR)
+	cp $< $@
 
 $(OUTPUT): $(OBJECTS) src/dinput8.def $(LINK_DEPS) | $(BINDIR) $(LIBDIR)
 	$(LINK) $(LDFLAGS) \

@@ -1,0 +1,382 @@
+# Goals: detailed analysis and plan
+
+Companion to [goals.md](goals.md), which has the short status overview. This
+document holds the reasoning: what the existing patch already does, hypotheses
+for each bug, how to investigate them, candidate fixes, and acceptance
+criteria. Sections are updated as the work progresses. Superseded hypotheses
+are struck out or removed rather than piled up.
+
+Last updated: 2026-10-11 (B1 root cause found and fix implemented).
+
+---
+
+## 0. Background that all goals depend on
+
+### 0.1 Engine timing model (from the existing patch)
+
+- **Logic**: authoritative simulation at **15 Hz** (`g_logicFPS`, never
+  changed). Each logic tick is split into **6 ordered phases**.
+- **Client/render**: stock 30 Hz, so 2 client frames per logic tick. The patch
+  sets `g_clientUpdateFPS = targetFPS` and a client/logic ratio
+  `R = targetFPS / 15` (3..6).
+- Between logic ticks, Drawables are placed using a **phase interpolation
+  float** written by `GameEngine_UpdatePhaseInterpolation` (hooked:
+  `update_phase_interpolation` in [game_patches.c](../src/game_patches.c)).
+- Many subsystems were authored per client frame without a time step. The
+  patch handles them one by one, in four ways:
+  - **Rescaling constants** with `30/target` or `x^(30/target)`: camera scroll,
+    zoom, shake, rotation, height adjust.
+  - **Feeding a synthetic 30 Hz frame counter**
+    (`get_retail_visual_frame` = `ceil(frame*30/target)`): tracers, cloud
+    effects, Anim2D.
+  - **Gating to 30 Hz with a Bresenham accumulator**: CPU particle simulation,
+    audio manager update, keyboard repeat.
+  - **Fixing time caches**: W3D ms clock (990 ms per nominal second), audio
+    ms/frame, visual seconds/frame, and radius-cursor frames/ms.
+
+Takeaway: **every remaining bug is probably one more per-frame system that
+none of these four treatments covers yet**, or a place where two clock domains
+meet.
+
+### 0.2 Environment facts
+
+- Game: `D:\SteamLibrary\steamapps\common\Command and Conquer 3 Tiberium Wars`
+  (read-only for us). The active SkuDef launches `RetailExe\1.10\cnc3game.dat`.
+- The live 1.10 `cnc3game.dat` differs from `cnc3game.dat.bak` by exactly one
+  byte, the PE Large-Address-Aware flag (`0x03` → `0x23` at file offset 0x12E).
+  This is harmless to signature scanning.
+- `RetailExe\1.9\cnc3game.dat` is the 2012 Steam build (PE timestamp
+  0x501755E8). Its larger `.bak` is the 2007 retail original. The same pattern
+  holds for KW `1.2\cnc3ep1.dat` (2012 Steam) vs its `.bak` (2008 retail).
+- Kane's Wrath: `D:\SteamLibrary\steamapps\common\Command and Conquer 3 - Kane's Wrath`,
+  with versions `RetailExe\1.2` and `1.3`.
+- The user's own WIP DLSS `d3d9.dll` mod is present. It is currently off, but
+  it's kept for its DXVK backend, which fixes out-of-memory bugs. It offers
+  only upscaling modes (DLAA to Ultra Performance) and **no frame
+  generation**, so it doesn't distort frame-rate observations.
+- Build: `tools_and_docs_by_claude/build.sh [targets]` runs the project
+  Makefile with a local Zig 0.16.0 (same version as upstream CI) and GNU make
+  4.4.1 (ezwinports). Zig caches are redirected to `.zig-cache/` inside the
+  project. `scripts/link_release.py` needed a Windows fix: POSIX `shlex`
+  splitting ate the backslashes in Zig's printed linker paths.
+- Offline resolver check: `tools_and_docs_by_claude/layout_check/run.sh <exe>...`
+  maps a game executable at 0x00400000 in a 64-bit host and runs every stage of
+  `resolve_game_layout`. Results on 2026-10-11:
+
+  | Executable | Result |
+  |---|---|
+  | TW 1.10 (2025) | all stages resolve |
+  | TW 1.9 Steam (2012) | all stages resolve |
+  | KW 1.03 (2025) | all stages resolve |
+  | KW 1.02 Steam (2012) | all stages resolve |
+  | TW 1.9 / KW 1.2 retail `.bak` | bootstrap fails (old retail images, not used) |
+
+  Rerun it after every change to signatures or resolver code, against TW 1.10
+  and KW 1.03 at least.
+
+### 0.3 Useful references
+
+- [implementation.md](implementation.md): the original author's detailed
+  notes, with RVAs for KW 1.02 Steam and some TW 1.09/1.10 addresses.
+- EA's GPL release of the **C&C Generals / Zero Hour source** (SAGE, the
+  predecessor engine to CnC3's). Class names such as `GameClient`, `Drawable`,
+  `Anim2D`, `ParticleSystem`, `Keyboard`, `W3DView` and `RadarEvent` largely
+  carry over, so it is the best guide to what the CnC3 binary is doing. To
+  verify: clone it into `tools_and_docs_by_claude/gitignored/` as a read-only
+  reference.
+- Ghidra 12.1.3 (system-wide), driven headless through the project's `ghidra`
+  MCP server (`tools_and_docs_by_claude/ghidra_tools/`), with the project
+  `ghidra_data/projects/CnC3.gpr` (TW 1.10 and KW 1.03 analysed).
+- `tools_and_docs_by_user/CnC_Modding_Support/`: EA's source XML, schemas
+  and shaders for TW and KW. Use it for data-driven parameters (locomotor
+  suspension for B2, FX/particle definitions for B3).
+- `tools_and_docs_by_claude/AllianceToolSwitchNotes/` and
+  `CNC3_ModdingResearch/`: notes from an earlier CnC3 reverse-engineering
+  project.
+
+### 0.4 Cross-cutting test method
+
+Each bug gets a **repeatable repro** (mission/skirmish, unit, camera action).
+Compare it at three settings:
+
+1. Stock 30 FPS (patch disabled via `enabled=0`)
+2. Patched 45 FPS
+3. Patched 90 FPS
+
+A bug that scales with FPS (worse at 90 than at 45) is a per-frame recurrence.
+A bug that is the same at every patched rate is more likely a clock-domain
+mismatch. Capture with the game-automation tooling (windowed mode +
+screenshots/recording) where possible.
+
+---
+
+## B1. Objective markers glitch for a few frames when they appear
+
+**Status:** root cause found and fix implemented (2026-10-11). It still needs
+an in-game test.
+
+### Symptom
+In campaign missions, an objective marker that comes on screen visibly
+glitches for a few frames before settling. The user reports that this happens
+in **every mission**, at both 90 and **45 FPS**.
+
+### Root cause (confirmed in Ghidra, TW 1.10 VAs)
+1. On-map objective markers are **APT (Flash) UI clips** in `TacticalHUD.swf`
+   (`TacticalObjectiveIcon`, `TacticalHUDObjectiveIndicatorStage`), not
+   models or Anim2D sprites.
+2. `ObjectiveIndicator_ObjectTarget_UpdateOnOffScreen` (0x7A24D1) and its
+   waypoint twin (0x7A201A) project the target to the screen every client
+   frame. When the target **enters** the screen, they create a new on-screen
+   indicator through `TacticalObjectiveIndicatorStageImpl::AddObjectIndicator`
+   / `AddWaypointIndicator`. When it **leaves**, they create an edge arrow
+   through `AddOffScreenIndicator`. These are vtable slots 0..2 at 0xABEB30.
+3. Each new indicator gadget only pushes its position to ActionScript
+   (`SetScreenRegion` / `SetScreenPos` / `SetObjectivePos`) after the clip's
+   **`OnInitialized`** callback (e.g. 0x7B134D sets flag +0x10 and pushes the
+   cached position). Until then, position updates are only cached.
+4. `OnInitialized` runs on the next **APT movie frame**.
+   `AptPlayer_Update` (0x44B7BC) feeds real `timeGetTime()` deltas (clamped to
+   60 ms) into `AptRuntime_AdvanceFramesByAccumulator` (0x8CC57F), which
+   advances one movie frame per ~33 ms. That is a fixed ~30 Hz, regardless of
+   render FPS.
+5. At stock 30 FPS, every rendered frame advances one APT frame, so the gap is
+   invisible. At 45 FPS the new clip is drawn unpositioned for about 1
+   rendered frame, and at 90 FPS for about 2. That is the glitch, and it
+   explains why it happens at 45 too and only when a marker appears.
+
+### Fix (implemented)
+The engine already has a "force an APT tick" switch: `AptPlayer+0x1E9`.
+`AptPlayer_RenderPrep_ForceTickIfFlagged` (0x448104) runs one APT update
+before drawing when it is set, and the update raises `dt` to at least 34 ms
+so one movie frame always advances. The game uses this itself, e.g. around
+display-mode changes.
+
+The patch redirects the three `Add*Indicator` vtable entries to wrappers
+that call the stock method and then set `g_aptPlayer->[0x1E9] = 1`. The new
+clip's `OnInitialized` → position push therefore runs before the frame is
+drawn.
+
+- Resolution: the `AptPlayer` constructor tail (`CMP/MOV [g_aptPlayer]`, both
+  operands equal) and three `Add*Indicator` prologue signatures (alloc size
+  0x54/0x60/0x4C, counter offset 0x24/0x30/0x3C, `RET 8` tail). The vtable is
+  the unique read-only pointer to `AddObjectIndicator`, with slots 1–2
+  verified.
+- Verified offline on TW 1.10, TW 1.9, KW 1.03 and KW 1.02 (all resolve).
+- Side effect: each forced tick advances APT time by about 34 ms instead of
+  the true ~11–22 ms, i.e. UI animations jump ahead by ~20 ms once per
+  marker creation. This is not noticeable.
+- Not covered (yet): radar/minimap objective indicators
+  (`TacticalRadarObjectiveIndicatorStage`) and other APT pop-ups. Extend the
+  same treatment if they show the same glitch.
+
+### Done when
+The user confirms in-game, at 45 and 90 FPS, that markers appear cleanly
+when scrolled into view and that edge arrows appear cleanly when scrolled
+out. Then this section moves to `implementation.md`.
+
+---
+
+## B2. Procedural unit animation is too intense
+
+### Symptom
+Some vehicles turn glitchily, and vehicle suspension/body wobble is
+exaggerated. At 45 FPS it was absent or too small to notice (tested
+2026-10-11), but clearly visible at 90. That fits a per-client-frame
+recurrence (hypothesis 1): at 45 it runs 1.5× as often as retail, at 90 3×.
+
+### Relevant existing code
+None. The patch currently doesn't touch Drawable physics transforms.
+
+### Hypotheses (ranked)
+1. **Per-client-frame Drawable "physics xform".** In SAGE (Generals:
+   `Drawable::calcPhysicsXformWheels/Treads/Hover/Motorcycle`), the visual
+   pitch, roll, yaw-wobble, suspension compression and acceleration tilt are
+   *spring/damper recurrences evaluated once per drawn frame with no dt*:
+   `rate += k*(target - value); rate *= damping; value += rate`. At 90 FPS
+   these run three times per retail frame, which raises the effective spring
+   stiffness and lets them overshoot or oscillate. This matches "suspension
+   wobbling around" closely.
+2. **Turn glitch from interpolation of orientation**, for example where the
+   logic orientation crosses ±π, or where the visual turn rate (a client-side
+   smoothing of logic yaw) is a per-frame lerp factor. A per-frame lerp at 90
+   FPS converges three times as fast and overshoots against the 15 Hz logic
+   steps, which reads as "snappy/glitchy".
+3. **Phase-interpolation granularity at 60/75 FPS** (`client_slot / R`) is
+   uneven with respect to when Object state is flushed. If this were the
+   cause, it would also show at 45/90, so a 45-vs-60 comparison rules it in or
+   out.
+
+### Investigation plan
+- Note which units are affected, e.g. GDI Predator/Pitbull/Rig, Nod Buggy,
+  Scorpion, hover units. Wheeled vs tracked vs hover will each point to a
+  different `calcPhysicsXform*` variant.
+- In Ghidra: locate the physics-xform functions by their float constants and
+  by their relationship to the Locomotor data (INI fields like `Suspension`,
+  `MaximumWheelExtension`, `PitchStiffness`, `RollStiffness`,
+  `PitchDamping`, `RollDamping`, `ForwardAccelerationPitchFactor`,
+  `LateralAccelerationRollFactor`, `UniformAxialDamping`, `TurnPivotOffset`).
+  Those field names come from Generals and should exist in CnC3 Locomotor INI
+  as well.
+- Measure the amplitude/settle time at 30 vs 90 FPS on a straight-line
+  start/stop and on a turn.
+
+### Candidate fixes (ordered by preference)
+1. **Rate-correct the recurrences** the same way the camera was handled:
+   stiffness `k' = 1 - (1-k)^(30/target)`, damping `d' = d^(30/target)`, and
+   per-frame additive deltas scaled by `30/target`. That means changing
+   instruction operands or hooking the per-locomotor-type functions.
+2. **Gate the physics xform update to 30 Hz** and interpolate the resulting
+   pitch/roll/height between the last two 30 Hz samples when drawing. This is
+   closer to stock but needs per-Drawable state for the previous sample.
+3. Last resort: gate to 30 Hz without interpolation. That brings the
+   stepping back, so it's only acceptable as a diagnostic.
+
+### Done when
+Side by side, wheeled, tracked and hover vehicles show the same suspension
+amplitude, settle time and turn appearance at 30 FPS stock as at every patched
+rate.
+
+---
+
+## B3. Particles still run at 30 Hz
+
+### Symptom
+Particle effects (smoke, fire, explosions, weapon trails) update in visible
+30 Hz steps while everything else is smooth.
+
+### Relevant existing code
+- `update_particles_at_retail_rate` deliberately gates
+  `ParticleSystemManager::UpdateForClientFrame` (CPU particle simulation) to
+  exactly 30 calls/s. W3D buffer preparation still runs every client frame.
+  So particles are *drawn* at full rate but their positions only *change* at
+  30 Hz.
+- GPU particles already compute their state in the shader from W3D time (30
+  fps time domain), so they are likely already smooth. This needs checking.
+- Tracers use the synthetic 30 Hz frame, so they are stepped in the same way.
+
+### Why the original author stopped here
+Particle modules apply per-frame deltas (velocity, drag, color/alpha/size
+keys, lifetime decrement, emission counts) without a dt. Making each module
+variable-step means rewriting each one.
+
+### Approach options
+1. **Render-time interpolation (preferred).** Keep the 30 Hz simulation
+   (lifetimes, emission and spawn counts stay exact). For each particle,
+   remember its position (and possibly size/alpha) at the previous simulation
+   step. When the W3D render buffers are filled every client frame, draw
+   `lerp(prev, curr, α)`, where α is the fraction of the 30 Hz step that has
+   elapsed (taken from the same Bresenham accumulator that gates the
+   simulation).
+   - Pros: exact retail behaviour, smooth motion, contained in one hook site
+     (buffer fill) plus a snapshot before each simulation step.
+   - Cons: adds up to one 30 Hz step (33 ms) of visual latency to particles
+     only. Particles attached to fast-moving units may appear to trail
+     slightly. Needs storage for the previous position: either a spare field
+     in the particle struct or a side table keyed by particle pointer/index.
+   - Newly spawned particles have no previous sample, so use α=1 or prev=curr.
+     Dead particles simply vanish, as they do now.
+2. **Render-time extrapolation.** Draw `curr + velocity * α * step`. No added
+   latency and no extra storage if velocity is in the struct, but it overshoots
+   on drag/bounce and is wrong for non-ballistic modules.
+3. **Full variable-step simulation.** Correct in principle, but it means
+   rewriting every particle module and its emission rules. Out of scope unless
+   options 1 and 2 fail.
+
+Secondary concern: emitters on moving objects spawn particles at 30 Hz
+positions, so trails "clump" in steps. Smoothing this would mean spreading the
+spawn positions along the emitter's path within the step. This is optional
+follow-up work.
+
+### Investigation plan
+- Find the particle struct layout (position, velocity, previous-position or
+  spare fields) and the CPU particle → W3D buffer copy loop that runs every
+  client frame. Ghidra, starting from the existing `particle_simulation` hook
+  site and `W3DParticleSystemManager`.
+- Confirm whether GPU particles are smooth already. If they are, the work is
+  limited to CPU particles.
+- Decide whether tracers should get the same treatment.
+
+### Done when
+At 90 FPS (and higher), CPU particle motion looks continuous. Particle
+lifetimes, counts and timings still match stock 30 FPS. Multiplayer CRC is
+unaffected (particles are client-side only, so this must be verified, not
+assumed).
+
+---
+
+## F1. Beyond 90 FPS (120 / 144 / 160+)
+
+### Blockers found in the current code
+1. **Config validation** ([config.c](../src/config.c)): only 45–90 in steps of
+   15 are accepted.
+2. **6-phase scheduler.** `get_phase_batch_limit`, `update_phase_interpolation`
+   and `is_client_slice_end` assume `R ≤ 6`, i.e. every client frame
+   dispatches **at least one** of the 6 logic phases. At `R > 6` (anything
+   above 90) some client frames must dispatch **zero** phases and only
+   render. We need to verify in Ghidra that the stock dispatch loop allows
+   that (the batch block "increments EDI first", which suggests it always
+   runs at least one phase). If it doesn't, the hook must skip the dispatch
+   entirely on render-only frames.
+3. **Interpolation resolution.** At `R > 6`, Drawable interpolation must
+   advance on every client frame (`client_slot / R`), not only when a phase
+   runs. Otherwise frames between phases repeat the same pose and the extra
+   FPS gains nothing visually.
+4. **Integer ratio assumptions.** `ENGINE_NOMINAL_CLIENT_FRAMES_PER_LOGIC_TICK`
+   and `ENGINE_PACING_UPDATE_MULTIPLIER` are integers, and `ratio = fps / 15`
+   truncates. So 144 (R = 9.6) and 160 (R = 10.67) need either:
+   - **(a)** multiples of 15 only: 105, 120, 135, 150, 165, 180. This is
+     simplest; 165 or 150 with VRR/G-Sync covers a 160 Hz monitor reasonably
+     well. Or
+   - **(b)** fractional scheduling: alternate 10 and 11 client frames per
+     logic tick (Bresenham) so the long-term rate is exactly 160. Or
+   - **(c)** fully decoupled, time-based rendering: render as fast as
+     allowed and compute the interpolation α from wall-clock time within the
+     current logic tick. This is the "modern engine" approach and the most
+     flexible, but it means replacing the pacing model rather than
+     subdividing it.
+   Recommendation: do (a) first to prove the scheduler works above 90, then
+   evaluate (b) or (c) for 144/160.
+5. **Frame pacing precision.** The stock limiter uses `timeGetTime` + `Sleep(0)`
+   at 1 ms granularity. At 160 FPS a frame is about 6.25 ms, so ±1 ms of
+   jitter is ±16%. The original author removed a QPC-based limiter on
+   purpose (to match retail audio cadence). Above 90 FPS a QPC/waitable-timer
+   limiter is probably needed again (or rely on VSync/VRR). The existing
+   Bresenham audio/keyboard gating should keep audio at retail cadence
+   either way.
+6. **Every accumulator and rate constant must be re-checked** for larger
+   `target_fps` and for non-multiples of 15: W3D clock remainder, limiter
+   remainder, `powf` exponents, `get_retail_visual_frame` (overflow-safe
+   already), and the radius-cursor frames/ms.
+7. **CPU headroom.** This is a 32-bit 2007 engine. Large battles may not
+   reach 160 FPS. The engine's adaptive `pacing_update_multiplier` must keep
+   degrading gracefully (lowering the effective rate) without speeding up or
+   slowing down the simulation.
+
+### Interaction with the bug fixes
+B2 and B3 fixes must be written against a general `target_fps` (exponents
+`30/target`, accumulators), not tuned for 90, so they keep working above 90.
+
+### Done when
+120 FPS works in campaign and skirmish with the logic still at exactly 15 Hz
+(a game clock or stopwatch over 5+ minutes matches stock), audio and keyboard
+cadence match retail, and no B1–B3 regressions appear. Stretch: 144 and 160
+(or arbitrary/uncapped) with stable frame pacing.
+
+---
+
+## Non-goals / out of scope (for now)
+- Multiplayer stability. Upstream already lists it as unstable at high FPS.
+  Our changes must not make it worse, but we won't be fixing desyncs.
+- Red Alert 3 port.
+- Changing the 15 Hz simulation rate.
+
+## Answered questions (2026-10-11)
+- B1 occurs in every mission. B1/B2 were only observed at 90 FPS; whether
+  they scale with FPS is still unknown, so this is the first thing to test.
+- The DLSS mod has no frame generation and is currently off.
+- Kane's Wrath stays supported. It differs only slightly from TW, so TW
+  changes should work there too (still verify with the offline resolver
+  check).
+
+## Open questions
+- Which units show B2 most clearly (wheeled, tracked or hover)?

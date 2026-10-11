@@ -160,6 +160,36 @@ static const u16 g_anim2d_update_pattern[] = {
     0x8B, 0x01, 0xFF, 0x50, 0x78, 0x2B, 0x46, 0x08, 0x3B, 0x46, 0x18
 };
 
+/*
+ * APT (Flash UI) advances movie frames on a real-time ~30 Hz accumulator.
+ * Objective markers are new APT clips that receive their first screen
+ * position from an OnInitialized callback on the next APT frame.
+ */
+static const u16 g_apt_player_singleton_pattern[] = {
+    0x88, 0x9E, 0xE9, 0x01, 0x00, 0x00, 0x88, 0x9E, 0xEA, 0x01, 0x00, 0x00,
+    0x39, 0x1D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x75, 0x06, 0x89, 0x35, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY
+};
+/* TacticalObjectiveIndicatorStageImpl::Add{Object,OffScreen,Waypoint}Indicator. */
+static const u16 g_add_object_indicator_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x56, 0x57, 0x6A, 0x54, 0x8B, 0xF1,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x85, 0xC0, 0x59, 0x74, 0x19, 0x8B, 0x56, 0x24, 0xFF, 0x75, 0x0C,
+    0x8D, 0x4A, 0x01, 0x52, 0x89, 0x4E, 0x24, 0x56, 0x8B, 0xC8, 0xE8
+};
+static const u16 g_add_offscreen_indicator_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x56, 0x57, 0x6A, 0x60, 0x8B, 0xF1,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x85, 0xC0, 0x59, 0x74, 0x19, 0x8B, 0x56, 0x30, 0xFF, 0x75, 0x0C,
+    0x8D, 0x4A, 0x01, 0x52, 0x89, 0x4E, 0x30, 0x56, 0x8B, 0xC8, 0xE8
+};
+static const u16 g_add_waypoint_indicator_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x56, 0x57, 0x6A, 0x4C, 0x8B, 0xF1,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x85, 0xC0, 0x59, 0x74, 0x19, 0x8B, 0x56, 0x3C, 0xFF, 0x75, 0x0C,
+    0x8D, 0x4A, 0x01, 0x52, 0x89, 0x4E, 0x3C, 0x56, 0x8B, 0xC8, 0xE8
+};
+
 /* Particle/cursor sites use a mix of client-frame and millisecond timebases. */
 static const u16 g_particle_pattern[] = {
     0x8B, 0xF1, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
@@ -782,6 +812,54 @@ static BOOL resolve_audio_sites(
         module, nt, expected_update, &audio->update_vtable_entry);
 }
 
+static BOOL resolve_objective_ui_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    ObjectiveUiLayout *ui = &game->objective_ui;
+    static const u8 thiscall_ret8_tail[] = { 0x5F, 0x8B, 0xC6, 0x5E, 0x5D, 0xC2, 0x08, 0x00 };
+    const u16 *patterns[ADD_INDICATOR_COUNT] = {
+        g_add_object_indicator_pattern,
+        g_add_offscreen_indicator_pattern,
+        g_add_waypoint_indicator_pattern
+    };
+    u32 match;
+    u32 slot;
+    u32 i;
+
+    /* CMP [g_aptPlayer],EBX / MOV [g_aptPlayer],ESI must name one global. */
+    if (!FIND_UNIQUE(module, nt, g_apt_player_singleton_pattern, &match) ||
+        load_u32(module + match + 14u) != load_u32(module + match + 22u) ||
+        !read_absolute_rva(module, game->pe_size_of_image, match + 14u,
+                           &ui->apt_player_pointer)) {
+        return FALSE;
+    }
+
+    for (i = 0; i < ADD_INDICATOR_COUNT; ++i) {
+        /* All three patterns share one length; only immediates differ. */
+        if (!find_unique_signature(module, nt, patterns[i],
+                                   ARRAY_COUNT(g_add_object_indicator_pattern),
+                                   &ui->add_indicator_functions[i]) ||
+            memcmp(module + ui->add_indicator_functions[i] + 115u - sizeof(thiscall_ret8_tail),
+                   thiscall_ret8_tail, sizeof(thiscall_ret8_tail)) != 0) {
+            return FALSE;
+        }
+    }
+
+    /* The stage vtable stores the three methods in consecutive slots 0..2. */
+    if (!find_unique_readonly_pointer(
+            module, nt, (u32)(uintptr_t)(module + ui->add_indicator_functions[0]),
+            &slot)) {
+        return FALSE;
+    }
+    for (i = 0; i < ADD_INDICATOR_COUNT; ++i) {
+        ui->add_indicator_vtable_entries[i] = slot + i * sizeof(u32);
+        if (load_u32(module + ui->add_indicator_vtable_entries[i]) !=
+            (u32)(uintptr_t)(module + ui->add_indicator_functions[i])) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 static BOOL resolve_scheduler_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     SchedulerLayout *scheduler = &game->scheduler;
@@ -885,6 +963,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_audio_sites(module, nt, &game) ||
         !resolve_scheduler_sites(module, nt, &game) ||
         !resolve_w3d_clock_sites(module, nt, &game) ||
+        !resolve_objective_ui_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

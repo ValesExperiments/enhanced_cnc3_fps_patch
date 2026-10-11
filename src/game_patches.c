@@ -48,6 +48,7 @@ typedef void(THISCALL *SubsystemUpdateFn)(void *subsystem);
 typedef u8(THISCALL *AudioUpdateFn)(void *audio_manager);
 typedef void(THISCALL *KeyboardPollFn)(void *keyboard);
 typedef u8(THISCALL *KeyboardCheckRepeatFn)(void *keyboard);
+typedef void **(THISCALL *AddIndicatorFn)(void *stage, void **out_indicator, void *target);
 typedef int(THISCALL *W3DViewScrollByFn)(void *view, const float *delta);
 typedef float(THISCALL *W3DViewGetZoomFn)(void *view);
 typedef int(THISCALL *W3DViewSetZoomFn)(void *view, float zoom);
@@ -57,6 +58,7 @@ typedef struct ZoomStep {
     float offset;
 } ZoomStep;
 
+static AddIndicatorFn g_original_add_indicator[ADD_INDICATOR_COUNT];
 static W3DViewScrollByFn g_original_scroll_by;
 static AudioUpdateFn g_original_audio_update;
 static KeyboardPollFn g_original_keyboard_poll;
@@ -356,6 +358,41 @@ static u8 THISCALL update_audio_at_retail_rate(void *audio_manager) {
     return g_original_audio_update(audio_manager);
 }
 
+/*
+ * Objective markers are APT clips created when their target enters (or
+ * leaves) the screen. Their screen position is pushed from the clip's
+ * OnInitialized callback, which only runs on the next APT movie frame. APT
+ * frames advance on a real-time ~33 ms accumulator, so above 30 FPS a new
+ * clip was drawn unpositioned for one or more client frames. Requesting the
+ * engine's own forced APT tick makes the callback run before that draw.
+ */
+static void request_apt_tick(void) {
+    u8 *player;
+
+    if (g_game == NULL) return;
+    player = *(u8 **)game_address(g_game, g_game->objective_ui.apt_player_pointer);
+    if (player != NULL) player[APT_PLAYER_FORCE_TICK] = 1;
+}
+
+static void **add_indicator_with_apt_tick(u32 kind, void *stage,
+                                          void **out_indicator, void *target) {
+    void **result = g_original_add_indicator[kind](stage, out_indicator, target);
+    request_apt_tick();
+    return result;
+}
+
+static void **THISCALL add_object_indicator(void *stage, void **out, void *target) {
+    return add_indicator_with_apt_tick(0, stage, out, target);
+}
+
+static void **THISCALL add_offscreen_indicator(void *stage, void **out, void *target) {
+    return add_indicator_with_apt_tick(1, stage, out, target);
+}
+
+static void **THISCALL add_waypoint_indicator(void *stage, void **out, void *target) {
+    return add_indicator_with_apt_tick(2, stage, out, target);
+}
+
 static void reset_keyboard_clock(void) {
     g_keyboard_last_poll_ms = timeGetTime();
     /* Seed one immediate tick, matching stock's first post-reset increment. */
@@ -603,6 +640,26 @@ static void install_audio_timing(PatchInstaller *installer) {
     patch_pointer(installer, "SageAudioManager update vtable entry",
                   audio->update_vtable_entry,
                   update_function, update_audio_at_retail_rate);
+}
+
+static void install_objective_indicator_tick(PatchInstaller *installer) {
+    static const char *const names[ADD_INDICATOR_COUNT] = {
+        "AddObjectIndicator vtable entry",
+        "AddOffScreenIndicator vtable entry",
+        "AddWaypointIndicator vtable entry"
+    };
+    const AddIndicatorFn wrappers[ADD_INDICATOR_COUNT] = {
+        add_object_indicator, add_offscreen_indicator, add_waypoint_indicator
+    };
+    const ObjectiveUiLayout *ui = &g_game->objective_ui;
+    u32 i;
+
+    for (i = 0; i < ADD_INDICATOR_COUNT; ++i) {
+        void *original = game_address(g_game, ui->add_indicator_functions[i]);
+        g_original_add_indicator[i] = (AddIndicatorFn)original;
+        patch_pointer(installer, names[i], ui->add_indicator_vtable_entries[i],
+                      original, (const void *)wrappers[i]);
+    }
 }
 
 static void patch_entry_jump(PatchInstaller *installer, const char *name,
@@ -936,6 +993,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_continuous_visuals(&installer);
     install_keyboard_timing(&installer);
     install_audio_timing(&installer);
+    install_objective_indicator_tick(&installer);
     install_camera_timing(&installer);
     install_frame_authored_effects(&installer);
     install_particle_and_cursor_timing(&installer);

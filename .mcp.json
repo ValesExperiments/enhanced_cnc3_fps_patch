@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "ghidra": {
+      "type": "stdio",
+      "command": "C:\\Users\\Kellan\\UsefulSSD\\Projects\\enhanced_cnc3_fps_patch\\tools_and_docs_by_claude\\venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\Users\\Kellan\\UsefulSSD\\Projects\\enhanced_cnc3_fps_patch\\tools_and_docs_by_claude\\ghidra_tools\\ghidra_mcp_server.py"
+      ],
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  }
+}
