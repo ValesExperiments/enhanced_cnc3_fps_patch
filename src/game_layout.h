@@ -96,6 +96,18 @@ typedef struct VisualLayout {
     u32 retail_frames_per_millisecond;
 } VisualLayout;
 
+typedef struct DrawablePhysicsLayout {
+    /*
+     * Drawable::calcPhysicsXform (locomotor pitch/roll/yaw/suspension springs)
+     * guards itself with "once per GameClient frame". Its frame read and the
+     * GameClient global it is read from.
+     */
+    u32 dispatcher_frame_call;
+    u32 game_client_pointer;
+    /* Drawable::applyPhysicsXform's call of that dispatcher. */
+    BranchSite apply_call;
+} DrawablePhysicsLayout;
+
 typedef struct ObjectiveUiLayout {
     /* Global AptPlayer* stored by the AptPlayer constructor. */
     u32 apt_player_pointer;
@@ -139,6 +151,7 @@ typedef struct GameLayout {
     VisualLayout visual;
     PacingLayout pacing;
     ObjectiveUiLayout objective_ui;
+    DrawablePhysicsLayout drawable_physics;
 } GameLayout;
 
 typedef enum GameResolveResult {

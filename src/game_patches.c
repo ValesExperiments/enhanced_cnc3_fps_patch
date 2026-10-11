@@ -244,19 +244,117 @@ static u32 STDCALL advance_w3d_time(u32 client_frame_delta) {
  * potentially overflowing full-width product. Repeated results are expected:
  * the game's existing duplicate-frame guards then skip surplus updates.
  */
-static u32 THISCALL get_retail_visual_frame(void *game_client) {
-    void **vtable;
-    GameClientGetFrameNumberFn get_frame_number;
-    u32 actual_frame;
-    u32 target_fps = g_config->target_fps;
+static u32 read_client_frame(void *game_client) {
+    void **vtable = *(void ***)game_client;
+    GameClientGetFrameNumberFn get_frame_number =
+        (GameClientGetFrameNumberFn)vtable[0x78u / sizeof(void *)];
+    return get_frame_number(game_client);
+}
 
-    if (game_client == NULL || target_fps < g_retail_visual_fps) return 0;
-    vtable = *(void ***)game_client;
-    get_frame_number = (GameClientGetFrameNumberFn)vtable[0x78u / sizeof(void *)];
-    actual_frame = get_frame_number(game_client);
+static u32 to_retail_visual_frame(u32 actual_frame) {
+    u32 target_fps = g_config->target_fps;
     return (actual_frame / target_fps) * g_retail_visual_fps +
            ((actual_frame % target_fps) * g_retail_visual_fps + target_fps - 1u) /
                target_fps;
+}
+
+static u32 THISCALL get_retail_visual_frame(void *game_client) {
+    if (game_client == NULL || g_config->target_fps < g_retail_visual_fps) return 0;
+    return to_retail_visual_frame(read_client_frame(game_client));
+}
+
+/*
+ * Drawable::calcPhysicsXform integrates locomotor springs (pitch, roll, yaw
+ * wobble, suspension height) once per GameClient frame without a time step,
+ * so at high FPS vehicles bounced and tilted several times too hard. Its frame
+ * guard now reads the synthetic 30 Hz frame, restoring retail spring rates.
+ *
+ * Its caller only applies a tilt when the dispatcher reports a fresh result,
+ * so between 30 Hz updates this wrapper supplies a blend of the last two
+ * results instead. The blend lags the springs by one retail frame (33 ms) but
+ * avoids both 30 Hz stepping and frames without any tilt.
+ */
+typedef u8(THISCALL *CalcPhysicsXformFn)(void *drawable, float *info);
+
+enum {
+    PHYSICS_XFORM_FLOATS = 4, /* pitch, roll, yaw, z offset */
+    PHYSICS_CACHE_SIZE = 8192, /* power of two */
+    PHYSICS_CACHE_PROBES = 16
+};
+
+typedef struct PhysicsXformCacheEntry {
+    void *drawable;
+    u32 retail_frame;
+    float previous[PHYSICS_XFORM_FLOATS];
+    float current[PHYSICS_XFORM_FLOATS];
+} PhysicsXformCacheEntry;
+
+static CalcPhysicsXformFn g_original_calc_physics_xform;
+static PhysicsXformCacheEntry g_physics_cache[PHYSICS_CACHE_SIZE];
+
+static PhysicsXformCacheEntry *find_physics_entry(void *drawable, u32 retail_frame) {
+    u32 hash = (u32)(((uintptr_t)drawable >> 3) * 2654435761u);
+    PhysicsXformCacheEntry *reusable = NULL;
+    u32 probe;
+
+    for (probe = 0; probe < PHYSICS_CACHE_PROBES; ++probe) {
+        PhysicsXformCacheEntry *entry =
+            &g_physics_cache[(hash + probe) & (PHYSICS_CACHE_SIZE - 1u)];
+        if (entry->drawable == drawable) return entry;
+        /* Entries not refreshed for two retail frames belong to dead drawables. */
+        if (reusable == NULL &&
+            (entry->drawable == NULL || retail_frame - entry->retail_frame > 2u)) {
+            reusable = entry;
+        }
+    }
+    if (reusable != NULL) {
+        reusable->drawable = drawable;
+        reusable->retail_frame = retail_frame - 2u;
+    }
+    return reusable;
+}
+
+static u8 THISCALL calc_physics_xform_interpolated(void *drawable, float *info) {
+    void *game_client = *(void **)game_address(
+        g_game, g_game->drawable_physics.game_client_pointer);
+    PhysicsXformCacheEntry *entry;
+    u32 target_fps = g_config->target_fps;
+    u32 actual_frame;
+    u32 retail_frame;
+    u32 remainder;
+    float alpha;
+    u32 i;
+
+    if (game_client == NULL) return g_original_calc_physics_xform(drawable, info);
+    actual_frame = read_client_frame(game_client);
+    retail_frame = to_retail_visual_frame(actual_frame);
+    entry = find_physics_entry(drawable, retail_frame);
+    if (entry == NULL) return g_original_calc_physics_xform(drawable, info);
+
+    if (g_original_calc_physics_xform(drawable, info)) {
+        /* A new 30 Hz result; keep the last one for blending if it is adjacent. */
+        if (entry->retail_frame + 1u == retail_frame) {
+            memcpy(entry->previous, entry->current, sizeof(entry->previous));
+        } else {
+            memcpy(entry->previous, info, sizeof(entry->previous));
+        }
+        memcpy(entry->current, info, sizeof(entry->current));
+        entry->retail_frame = retail_frame;
+    } else if (entry->retail_frame != retail_frame) {
+        /* No locomotor physics for this drawable (or not yet computed). */
+        return 0;
+    }
+
+    /*
+     * Retail time t = actual * 30 / target lies in (retail_frame - 1, retail_frame].
+     * Blend previous -> current by t's position in that interval.
+     */
+    remainder = (u32)(((u64)actual_frame * g_retail_visual_fps) % target_fps);
+    alpha = remainder == 0u ? 1.0f : (float)remainder / (float)target_fps;
+    for (i = 0; i < PHYSICS_XFORM_FLOATS; ++i) {
+        info[i] = entry->previous[i] + (entry->current[i] - entry->previous[i]) * alpha;
+    }
+    return 1;
 }
 
 static void THISCALL update_particles_at_retail_rate(void *manager) {
@@ -548,19 +646,22 @@ static void patch_branch(PatchInstaller *installer, const char *name,
     installer->ok = FALSE;
 }
 
+enum { NO_INTERLEAVED_PUSH = 0, PUSH_EDI = 0x57, PUSH_EBX = 0x53 };
+
 static void redirect_frame_read(PatchInstaller *installer, const char *name,
-                                u32 rva, BOOL preserves_edi) {
+                                u32 rva, u8 interleaved_push) {
     static const u8 virtual_call[] = { 0x8B, 0x01, 0xFF, 0x50, 0x78 };
-    static const u8 virtual_call_with_push[] = { 0x8B, 0x01, 0x57, 0xFF, 0x50, 0x78 };
+    u8 virtual_call_with_push[] = { 0x8B, 0x01, 0, 0xFF, 0x50, 0x78 };
     u8 replacement[6] = { 0xE8, 0, 0, 0, 0, 0 };
     const u8 *expected = virtual_call;
     size_t size = sizeof(virtual_call);
 
-    if (preserves_edi) {
-        /* The tracer update has PUSH EDI between vtable load and virtual call. */
+    if (interleaved_push != NO_INTERLEAVED_PUSH) {
+        /* Some sites push a register between the vtable load and the call. */
+        virtual_call_with_push[2] = interleaved_push;
         expected = virtual_call_with_push;
         size = sizeof(virtual_call_with_push);
-        replacement[0] = 0x57;
+        replacement[0] = interleaved_push;
         replacement[1] = 0xE8;
         encode_rel32(&replacement[2], game_address(g_game, rva + 6u),
                      get_retail_visual_frame);
@@ -746,15 +847,31 @@ static void install_frame_authored_effects(PatchInstaller *installer) {
 
     /* Keep all stored and compared timestamps in the same synthetic domain. */
     redirect_frame_read(installer, "tracer reset frame read",
-                        visual->tracer_reset_frame_call, FALSE);
+                        visual->tracer_reset_frame_call, NO_INTERLEAVED_PUSH);
     redirect_frame_read(installer, "tracer update frame read",
-                        visual->tracer_update_frame_call, TRUE);
+                        visual->tracer_update_frame_call, PUSH_EDI);
     redirect_frame_read(installer, "cloud-effect frame read",
-                        visual->cloud_frame_call, FALSE);
+                        visual->cloud_frame_call, NO_INTERLEAVED_PUSH);
     redirect_frame_read(installer, "Anim2D timestamp frame read",
-                        visual->anim2d_timestamp_frame_call, FALSE);
+                        visual->anim2d_timestamp_frame_call, NO_INTERLEAVED_PUSH);
     redirect_frame_read(installer, "Anim2D update frame read",
-                        visual->anim2d_update_frame_call, FALSE);
+                        visual->anim2d_update_frame_call, NO_INTERLEAVED_PUSH);
+}
+
+static void install_drawable_physics_timing(PatchInstaller *installer) {
+    const DrawablePhysicsLayout *physics = &g_game->drawable_physics;
+    u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
+
+    g_original_calc_physics_xform = (CalcPhysicsXformFn)game_address(
+        g_game, physics->apply_call.target);
+    /* The once-per-frame guard now advances the springs at the retail rate. */
+    redirect_frame_read(installer, "physics-xform frame read",
+                        physics->dispatcher_frame_call, PUSH_EBX);
+    encode_rel32(&call_patch[1],
+                 game_address(g_game, physics->apply_call.instruction + 5u),
+                 calc_physics_xform_interpolated);
+    patch_branch(installer, "applyPhysicsXform dispatcher call",
+                 &physics->apply_call, 0xE8, call_patch, sizeof(call_patch));
 }
 
 static void install_particle_and_cursor_timing(PatchInstaller *installer) {
@@ -996,6 +1113,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_objective_indicator_tick(&installer);
     install_camera_timing(&installer);
     install_frame_authored_effects(&installer);
+    install_drawable_physics_timing(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);
     install_w3d_clock(&installer);
@@ -1059,6 +1177,8 @@ void game_patches_reset_state(void) {
         g_w3d_time_remainder = 0;
         g_limiter_interval_remainder = 0;
         g_limiter_interval_divisor = 0;
+        /* Drawables from a previous session may share addresses with new ones. */
+        memset(g_physics_cache, 0, sizeof(g_physics_cache));
         reset_keyboard_clock();
         /* First direct reader gets floor(990/FPS); the hook distributes remainder. */
         *(u32 *)game_address(g_game, g_game->timing.w3d_milliseconds_per_frame) =

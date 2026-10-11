@@ -89,6 +89,15 @@ Fix or remove anything that turns out to be wrong.
   0x1E9 = "force an APT tick before the next APT render".
 - On-map objective markers are APT clips managed by
   `TacticalObjectiveIndicatorStageImpl` (B1; see docs/goals_detailed.md).
+- **Common pattern:** many client systems guard themselves with
+  "if (stored == GameClient->getFrame()) return" (vtable +0x78 on
+  `g_theGameClient`, TW 1.10 VA 0xBEAC00). Redirecting that one read to the
+  patch's synthetic 30 Hz frame throttles the system to the retail rate. If
+  the caller needs a value every frame, add a cache/blend wrapper (B2's
+  `calc_physics_xform_interpolated`).
+- TW and KW differ in some struct offsets (e.g. Object→AI is 0x2E8 in TW and
+  0x2F4 in KW). Wildcard such bytes and always run layout_check on all four
+  builds: one failing stage disables the whole patch.
 
 ## Lessons from tooling problems
 - A PyGhidra/JVM process does **not** exit when its MCP client disconnects,

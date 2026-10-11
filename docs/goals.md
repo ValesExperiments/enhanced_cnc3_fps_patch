@@ -19,8 +19,9 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 
 | # | Goal | Status |
 |---|------|--------|
-| B1 | Objective markers should not glitch for a few frames when they appear on screen in missions | Fix implemented, **needs in-game test** |
-| B2 | Procedural unit motion (vehicle turning, suspension and body wobble) should look the same as at 30 FPS, not exaggerated | Not started |
+| B1 | Objective markers should not glitch for a few frames when they appear on screen in missions | **Done** (confirmed in-game 2026-10-11) |
+| B2 | Procedural unit motion (vehicle turning, suspension and body wobble) should look the same as at 30 FPS, not exaggerated | Fix implemented, **needs in-game test** |
+| B4 | All moving vehicles and aircraft should move smoothly (a small stutter is visible at 90 FPS) | May be fixed by B2; retest |
 | B3 | Particles should move smoothly at the render rate rather than in 30 Hz steps (e.g. by interpolation) | Not started |
 | F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | Not started |
 
@@ -35,13 +36,13 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 
 ## Current understanding in one line each
 
-- **B1 (root cause found):** Markers are Flash/APT UI clips. A new clip gets
+- **B1 (fixed):** Markers are Flash/APT UI clips. A new clip gets
   its screen position on the next APT frame, and APT frames advance on a real
   ~30 Hz clock, so at high FPS the clip is drawn unpositioned for 1–2 frames.
   The fix asks APT for an immediate tick whenever a marker is created.
-- **B2:** Most likely client-side per-frame physics on Drawables (pitch, roll,
-  wobble and suspension recurrences) that run once per rendered frame without
-  any time step, so at 90 FPS they spring three times as often.
+- **B2 (root cause found):** The locomotor tilt/suspension springs ran once
+  per rendered frame. They now run at the retail 30 Hz, and the result is
+  smoothly blended in between.
 - **B3:** The patch deliberately runs CPU particle simulation at 30 Hz. The
   plan is to keep it there and interpolate (or extrapolate) particle positions
   when drawing.

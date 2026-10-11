@@ -136,6 +136,7 @@ static int check(const char *path) {
         { "scheduler", resolve_scheduler_sites },
         { "w3d_clock", resolve_w3d_clock_sites },
         { "objective_ui", resolve_objective_ui_sites },
+        { "drawable_physics", resolve_drawable_physics_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;

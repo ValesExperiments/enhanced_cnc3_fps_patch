@@ -190,6 +190,30 @@ static const u16 g_add_waypoint_indicator_pattern[] = {
     0x8D, 0x4A, 0x01, 0x52, 0x89, 0x4E, 0x3C, 0x56, 0x8B, 0xC8, 0xE8
 };
 
+/*
+ * Drawable::calcPhysicsXform body after its 7-byte prologue: Object->AI->
+ * Locomotor, then "if (locomotor->lastFrame == GameClient frame) return 0".
+ * The Object->AI offset differs (TW 0x2E8, KW 0x2F4).
+ */
+static const u16 g_physics_xform_dispatcher_pattern[] = {
+    0x8B, 0x87, 0x40, 0x01, 0x00, 0x00, 0x85, 0xC0, 0x74, 0x08,
+    0x8B, 0x80, PATTERN_ANY, 0x02, 0x00, 0x00, 0xEB, 0x02, 0x33, 0xC0, 0x85, 0xC0,
+    0xC6, 0x45, 0xFF, 0x00, 0x0F, 0x84, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x56, 0x8B, 0xB0, 0xF4, 0x01, 0x00, 0x00, 0x85, 0xF6,
+    0x0F, 0x84, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x01, 0x53, 0xFF, 0x50, 0x78, 0x8B, 0xD8,
+    0x39, 0x9E, 0xC0, 0x00, 0x00, 0x00
+};
+/* Drawable::applyPhysicsXform zeroes the 4-float info record, then calls it. */
+static const u16 g_physics_xform_apply_pattern[] = {
+    0x8D, 0x45, 0xF0, 0x50, 0x8B, 0xCE,
+    0xF3, 0x0F, 0x11, 0x45, 0xF0, 0xF3, 0x0F, 0x11, 0x45, 0xF4,
+    0xF3, 0x0F, 0x11, 0x45, 0xF8, 0xF3, 0x0F, 0x11, 0x45, 0xFC,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x84, 0xC0, 0x0F, 0x84
+};
+
 /* Particle/cursor sites use a mix of client-frame and millisecond timebases. */
 static const u16 g_particle_pattern[] = {
     0x8B, 0xF1, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
@@ -812,6 +836,31 @@ static BOOL resolve_audio_sites(
         module, nt, expected_update, &audio->update_vtable_entry);
 }
 
+static BOOL resolve_drawable_physics_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    DrawablePhysicsLayout *physics = &game->drawable_physics;
+    static const u8 dispatcher_prologue[] = { 0x55, 0x8B, 0xEC, 0x51, 0x57, 0x8B, 0xF9 };
+    u32 body;
+    u32 call;
+
+    if (!FIND_UNIQUE(module, nt, g_physics_xform_dispatcher_pattern, &body) ||
+        body < sizeof(dispatcher_prologue) ||
+        memcmp(module + body - sizeof(dispatcher_prologue), dispatcher_prologue,
+               sizeof(dispatcher_prologue)) != 0 ||
+        !read_absolute_rva(module, game->pe_size_of_image, body + 0x31u,
+                           &physics->game_client_pointer)) {
+        return FALSE;
+    }
+    physics->dispatcher_frame_call = body + 0x35u;
+
+    if (!FIND_UNIQUE(module, nt, g_physics_xform_apply_pattern, &call)) return FALSE;
+    physics->apply_call.instruction = call + 26u;
+    return decode_relative_target(module, game->pe_size_of_image,
+                                  physics->apply_call.instruction, 0xE8,
+                                  &physics->apply_call.target) &&
+           physics->apply_call.target == body - sizeof(dispatcher_prologue);
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -964,6 +1013,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_scheduler_sites(module, nt, &game) ||
         !resolve_w3d_clock_sites(module, nt, &game) ||
         !resolve_objective_ui_sites(module, nt, &game) ||
+        !resolve_drawable_physics_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

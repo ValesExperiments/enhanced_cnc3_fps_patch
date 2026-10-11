@@ -6,7 +6,7 @@ for each bug, how to investigate them, candidate fixes, and acceptance
 criteria. Sections are updated as the work progresses. Superseded hypotheses
 are struck out or removed rather than piled up.
 
-Last updated: 2026-10-11 (B1 root cause found and fix implemented).
+Last updated: 2026-10-11 (B1 fixed; B2 root cause found and fix implemented).
 
 ---
 
@@ -112,8 +112,7 @@ screenshots/recording) where possible.
 
 ## B1. Objective markers glitch for a few frames when they appear
 
-**Status:** root cause found and fix implemented (2026-10-11). It still needs
-an in-game test.
+**Status:** fixed. Confirmed in-game by the user on 2026-10-11.
 
 ### Symptom
 In campaign missions, an objective marker that comes on screen visibly
@@ -178,63 +177,69 @@ out. Then this section moves to `implementation.md`.
 
 ## B2. Procedural unit animation is too intense
 
+**Status:** root cause found and fix implemented (2026-10-11). It still needs
+an in-game test.
+
 ### Symptom
 Some vehicles turn glitchily, and vehicle suspension/body wobble is
-exaggerated. At 45 FPS it was absent or too small to notice (tested
-2026-10-11), but clearly visible at 90. That fits a per-client-frame
-recurrence (hypothesis 1): at 45 it runs 1.5× as often as retail, at 90 3×.
+exaggerated. At 45 FPS it was absent or too small to notice, but clearly
+visible at 90. The best repro cases (user, 2026-10-11) are the **GDI
+Surveyor**, which bobs up and down while driving (the worst case), and the
+**GDI Harvester**, which glitches when turning or stopping.
 
-### Relevant existing code
-None. The patch currently doesn't touch Drawable physics transforms.
+### Root cause (confirmed in Ghidra, TW 1.10 VAs)
+- Locomotor templates (EA XML, `GlobalData/Locomotor.xml`) define SAGE's
+  visual "physics transform": `Appearance`, `PitchStiffness`/`PitchDamping`,
+  `RollStiffness`/`RollDamping`, `BounceKick`, `AccelPitchLimit`,
+  `ForwardAccelerationPitchFactor`, `HasSuspension`, and
+  `MaximumWheelExtension`/`Compression`. The Surveyor's
+  `GDISurveyorLocomotor` uses `FOUR_WHEELS` with suspension.
+- `Drawable_applyPhysicsXform` (0x48E8C7) zeroes a 4-float record (pitch,
+  roll, yaw, z) and calls `Drawable_calcPhysicsXform_dispatch` (0x48E0F5). It
+  applies the tilt only when the dispatcher returns true.
+- The dispatcher reaches `Object(+0x140) → AI(+0x2E8, KW +0x2F4) →
+  Locomotor(+0x1F4)`, has a **once-per-GameClient-frame guard**
+  (`locomotor+0xC0 == frame`), and then switches on the appearance type into
+  four spring/damper integrators (0x473349, 0x48C906, 0x47354F, 0x47D7FD).
+  These are found via `DrawableLocoInfo`'s constructor.
+- Those integrators have no time step, so at 90 FPS the springs, kicks and
+  acceleration-tilt run 3× as often as retail.
 
-### Hypotheses (ranked)
-1. **Per-client-frame Drawable "physics xform".** In SAGE (Generals:
-   `Drawable::calcPhysicsXformWheels/Treads/Hover/Motorcycle`), the visual
-   pitch, roll, yaw-wobble, suspension compression and acceleration tilt are
-   *spring/damper recurrences evaluated once per drawn frame with no dt*:
-   `rate += k*(target - value); rate *= damping; value += rate`. At 90 FPS
-   these run three times per retail frame, which raises the effective spring
-   stiffness and lets them overshoot or oscillate. This matches "suspension
-   wobbling around" closely.
-2. **Turn glitch from interpolation of orientation**, for example where the
-   logic orientation crosses ±π, or where the visual turn rate (a client-side
-   smoothing of logic yaw) is a per-frame lerp factor. A per-frame lerp at 90
-   FPS converges three times as fast and overshoots against the 15 Hz logic
-   steps, which reads as "snappy/glitchy".
-3. **Phase-interpolation granularity at 60/75 FPS** (`client_slot / R`) is
-   uneven with respect to when Object state is flushed. If this were the
-   cause, it would also show at 45/90, so a 45-vs-60 comparison rules it in or
-   out.
-
-### Investigation plan
-- Note which units are affected, e.g. GDI Predator/Pitbull/Rig, Nod Buggy,
-  Scorpion, hover units. Wheeled vs tracked vs hover will each point to a
-  different `calcPhysicsXform*` variant.
-- In Ghidra: locate the physics-xform functions by their float constants and
-  by their relationship to the Locomotor data (INI fields like `Suspension`,
-  `MaximumWheelExtension`, `PitchStiffness`, `RollStiffness`,
-  `PitchDamping`, `RollDamping`, `ForwardAccelerationPitchFactor`,
-  `LateralAccelerationRollFactor`, `UniformAxialDamping`, `TurnPivotOffset`).
-  Those field names come from Generals and should exist in CnC3 Locomotor INI
-  as well.
-- Measure the amplitude/settle time at 30 vs 90 FPS on a straight-line
-  start/stop and on a turn.
-
-### Candidate fixes (ordered by preference)
-1. **Rate-correct the recurrences** the same way the camera was handled:
-   stiffness `k' = 1 - (1-k)^(30/target)`, damping `d' = d^(30/target)`, and
-   per-frame additive deltas scaled by `30/target`. That means changing
-   instruction operands or hooking the per-locomotor-type functions.
-2. **Gate the physics xform update to 30 Hz** and interpolate the resulting
-   pitch/roll/height between the last two 30 Hz samples when drawing. This is
-   closer to stock but needs per-Drawable state for the previous sample.
-3. Last resort: gate to 30 Hz without interpolation. That brings the
-   stepping back, so it's only acceptable as a diagnostic.
+### Fix (implemented)
+1. The dispatcher's frame read now uses the synthetic 30 Hz frame
+   (`get_retail_visual_frame`), so its own guard advances the springs at
+   exactly the retail rate (same technique as tracers/Anim2D).
+2. `applyPhysicsXform`'s call is redirected to
+   `calc_physics_xform_interpolated`. It keeps the last two 30 Hz results per
+   drawable (8192-entry open-addressing cache keyed by `Drawable*`, stale
+   entries recycled after two retail frames, cleared each session) and
+   returns a linear blend for the current client frame. Retail time
+   `t = frame*30/target`; blend factor = frac(t) (1 at exact retail frames).
+   The tilt lags by at most one retail frame (33 ms) but never steps or
+   disappears.
+- Signatures: the dispatcher body (Object→AI offset wildcarded, since it
+  differs between TW and KW) plus the call site after the four `movss`
+  zeroing stores. The call target must equal the dispatcher entry. Verified
+  offline on TW 1.10, TW 1.9, KW 1.03 and KW 1.02.
+- Client-side only (Drawable); no effect on logic/CRC.
 
 ### Done when
-Side by side, wheeled, tracked and hover vehicles show the same suspension
-amplitude, settle time and turn appearance at 30 FPS stock as at every patched
-rate.
+Side by side with stock 30 FPS, the Surveyor no longer bobs harder, and the
+Harvester turns and stops without glitches at 90 FPS. Then check a hover unit
+and an aircraft too.
+
+---
+
+## B4. All vehicles and aircraft stutter slightly while moving (90 FPS)
+
+**Status:** reported by the user on 2026-10-11; may be fixed by B2.
+
+The physics-transform integrators derive acceleration-tilt from per-frame
+velocity changes. Logic velocity only changes on 15 Hz ticks, so at 90 FPS a
+spike landed on 1 client frame in 6 (stock: 1 in 2). Aircraft use the same
+dispatcher (hover/wings/thrust appearances). If the stutter remains after the
+B2 fix, investigate the Drawable position interpolation between logic
+phases next (`update_phase_interpolation`, the client-slice Drawable flush).
 
 ---
 
