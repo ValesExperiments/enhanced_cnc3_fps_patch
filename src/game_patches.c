@@ -458,9 +458,8 @@ static void THISCALL update_particles_at_retail_rate(void *manager) {
  * CPU particles are simulated at the retail 30 Hz, so drawn as-is they move,
  * grow, spin and fade in 30 Hz steps. While a system is drawn, each value the
  * draw module reads (position, colour, alpha, size, rotations) is temporarily
- * replaced by a blend of its values from the previous and the latest 30 Hz
- * step, then restored, so simulation never sees blended values. The blend
- * lags one step (33 ms), like Drawable interpolation. This covers the
+ * replaced by its value projected from the last two 30 Hz steps to the
+ * current moment, then restored, so simulation never sees projected values. This covers the
  * Default, Streak, Lightning and RenderObject draw modules, which all read
  * particles through the storage module's virtual count/get.
  *
@@ -475,23 +474,36 @@ enum {
     PARTICLE_CACHE_SIZE = 16384, /* power of two */
     PARTICLE_CACHE_PROBES = 16,
     PARTICLE_DRAW_MAX = 4096,
-    PARTICLE_BLEND_VALUES = 10,
+    PARTICLE_BLEND_VALUES = 11, /* largest field table */
     PARTICLE_RESTORE_MAX = PARTICLE_DRAW_MAX * PARTICLE_BLEND_VALUES
 };
 
 /*
  * Per-particle module objects and the float fields the draw modules read.
  * A missing module (NULL pointer) simply leaves those values unblended.
+ * Default/Streak/Lightning particles use DefaultUpdateParticleModule (size
+ * +0x10, rotations +0x08/+0x24); RenderObject particles use
+ * RenderObjectParticleUpdateModule (size vector +0x30..+0x38, rotation +0x08).
  */
-static const struct {
-    u32 module;  /* particle offset of the module pointer, 0 = particle itself */
-    u32 offset;  /* float field inside it */
-} g_particle_blend_fields[PARTICLE_BLEND_VALUES] = {
-    { 0, 0x10 }, { 0, 0x14 }, { 0, 0x18 },          /* position */
-    { 0x5C, 0x94 }, { 0x5C, 0x98 }, { 0x5C, 0x9C }, /* colour */
-    { 0x60, 0x48 },                                 /* alpha */
-    { 0x64, 0x10 },                                 /* size */
-    { 0x64, 0x08 }, { 0x64, 0x24 }                  /* rotations */
+typedef struct ParticleBlendField {
+    u32 module;     /* particle offset of the module pointer, 0 = particle itself */
+    u32 offset;     /* float field inside it */
+    BOOL non_negative; /* sizes, colours and alpha never project below zero */
+} ParticleBlendField;
+
+static const ParticleBlendField g_default_particle_fields[] = {
+    { 0, 0x10, FALSE }, { 0, 0x14, FALSE }, { 0, 0x18, FALSE },          /* position */
+    { 0x5C, 0x94, TRUE }, { 0x5C, 0x98, TRUE }, { 0x5C, 0x9C, TRUE },    /* colour */
+    { 0x60, 0x48, TRUE },                                                /* alpha */
+    { 0x64, 0x10, TRUE },                                                /* size */
+    { 0x64, 0x08, FALSE }, { 0x64, 0x24, FALSE }                         /* rotations */
+};
+static const ParticleBlendField g_render_object_particle_fields[] = {
+    { 0, 0x10, FALSE }, { 0, 0x14, FALSE }, { 0, 0x18, FALSE },          /* position */
+    { 0x5C, 0x94, TRUE }, { 0x5C, 0x98, TRUE }, { 0x5C, 0x9C, TRUE },    /* colour */
+    { 0x60, 0x48, TRUE },                                                /* alpha */
+    { 0x64, 0x30, TRUE }, { 0x64, 0x34, TRUE }, { 0x64, 0x38, TRUE },    /* size xyz */
+    { 0x64, 0x08, FALSE }                                                /* rotation */
 };
 
 typedef struct ParticleCacheEntry {
@@ -553,6 +565,12 @@ static void track_particle(ParticleCacheEntry *entry, BOOL is_new,
 static int draw_particles_interpolated(u32 kind, void *draw_module,
                                        void *a, void *b, void *c) {
     ParticleDrawFn original = g_original_particle_draw[kind];
+    const ParticleBlendField *field_table = kind == PARTICLE_DRAW_RENDER_OBJECT
+        ? g_render_object_particle_fields : g_default_particle_fields;
+    u32 field_count = kind == PARTICLE_DRAW_RENDER_OBJECT
+        ? (u32)ARRAY_COUNT(g_render_object_particle_fields)
+        : (u32)ARRAY_COUNT(g_default_particle_fields);
+    float value;
     u8 *system = *(u8 **)((u8 *)draw_module + PARTICLE_DRAW_MODULE_SYSTEM);
     void *storage;
     void **vtable;
@@ -587,11 +605,15 @@ static int draw_particles_interpolated(u32 kind, void *draw_module,
         if (particle == NULL) continue;
         for (k = 0; k < PARTICLE_BLEND_VALUES; ++k) {
             u8 *base = particle;
-            if (g_particle_blend_fields[k].module != 0) {
-                base = *(u8 **)(particle + g_particle_blend_fields[k].module);
+            fields[k] = NULL;
+            values[k] = 0.0f;
+            if (k >= field_count) continue;
+            if (field_table[k].module != 0) {
+                base = *(u8 **)(particle + field_table[k].module);
             }
-            fields[k] = base != NULL ? (float *)(base + g_particle_blend_fields[k].offset) : NULL;
-            values[k] = fields[k] != NULL ? *fields[k] : 0.0f;
+            if (base == NULL) continue;
+            fields[k] = (float *)(base + field_table[k].offset);
+            values[k] = *fields[k];
         }
         entry = find_particle_entry(particle, &is_new);
         if (entry == NULL) continue;
@@ -603,8 +625,15 @@ static int draw_particles_interpolated(u32 kind, void *draw_module,
             g_particle_restore_field[saved] = fields[k];
             g_particle_restore_value[saved] = values[k];
             ++saved;
-            *fields[k] = entry->previous[k] +
-                         (entry->current[k] - entry->previous[k]) * alpha;
+            /*
+             * Project forward from the latest step by the elapsed fraction
+             * of the next one. Unlike blending between the last two steps,
+             * this has no lag, so a particle fading out reaches its final
+             * state as the simulation removes it instead of popping.
+             */
+            value = entry->current[k] + (entry->current[k] - entry->previous[k]) * alpha;
+            if (field_table[k].non_negative && value < 0.0f) value = 0.0f;
+            *fields[k] = value;
         }
     }
 
@@ -1358,6 +1387,40 @@ static void install_frame_authored_effects(PatchInstaller *installer) {
                         visual->anim2d_update_frame_call, NO_INTERLEAVED_PUSH);
 }
 
+/*
+ * A camera ease-to-object controller integrates "progress += speed;
+ * speed += accel (up to limit)" once per client frame. With dt = 30/targetFPS
+ * the retail motion is kept by scaling each accel by dt^2 and each limit by
+ * dt; the stock constants are only read by this controller.
+ */
+static float g_camera_ease_limits[2];
+static float g_camera_ease_accels[2];
+
+static void install_camera_ease_timing(PatchInstaller *installer) {
+    static const char *const limit_names[2] = {
+        "camera ease phase A speed limit operand", "camera ease phase B speed limit operand"
+    };
+    static const char *const accel_names[2] = {
+        "camera ease phase A acceleration operand", "camera ease phase B acceleration operand"
+    };
+    const CameraEaseLayout *ease = &g_game->camera_ease;
+    float dt = (float)g_retail_visual_fps / (float)g_config->target_fps;
+    u32 i;
+
+    for (i = 0; i < 2; ++i) {
+        float *retail_limit = (float *)(uintptr_t)load_u32(
+            game_address(g_game, ease->limit_operands[i]));
+        float *retail_accel = (float *)(uintptr_t)load_u32(
+            game_address(g_game, ease->accel_operands[i]));
+        g_camera_ease_limits[i] = *retail_limit * dt;
+        g_camera_ease_accels[i] = *retail_accel * dt * dt;
+        patch_pointer(installer, limit_names[i], ease->limit_operands[i],
+                      retail_limit, &g_camera_ease_limits[i]);
+        patch_pointer(installer, accel_names[i], ease->accel_operands[i],
+                      retail_accel, &g_camera_ease_accels[i]);
+    }
+}
+
 static void install_tracer_motion(PatchInstaller *installer) {
     const TracerLayout *tracers = &g_game->tracers;
     u8 jump_patch[5] = { 0xE9, 0, 0, 0, 0 };
@@ -1688,6 +1751,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_frame_authored_effects(&installer);
     install_drawable_physics_timing(&installer);
     install_tracer_motion(&installer);
+    install_camera_ease_timing(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);

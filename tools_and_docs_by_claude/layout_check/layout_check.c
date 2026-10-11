@@ -141,6 +141,7 @@ static int check(const char *path) {
         { "selection_panel", resolve_selection_panel_sites },
         { "particle_draw", resolve_particle_draw_sites },
         { "tracers", resolve_tracer_sites },
+        { "camera_ease", resolve_camera_ease_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;

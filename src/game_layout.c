@@ -1187,6 +1187,52 @@ static BOOL resolve_tracer_sites(
     return matches == 1;
 }
 
+/*
+ * MOVSS XMM2,[limit]; COMISS; MOVAPS; ADDSS r,[progress]; MOVSS [progress],r;
+ * JBE +14h; MOVSS XMM2,[accel]; ADDSS. The two phases differ in registers.
+ */
+static const u16 g_camera_ease_phase_a_pattern[] = {
+    0xF3, 0x0F, 0x10, 0x15, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x0F, 0x2F, 0xD0, 0x0F, 0x28, 0xC8,
+    0xF3, 0x0F, 0x58, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xF3, 0x0F, 0x11, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x76, 0x14, 0xF3, 0x0F, 0x10, 0x15, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xF3, 0x0F, 0x58, 0xD0
+};
+static const u16 g_camera_ease_phase_b_pattern[] = {
+    0xF3, 0x0F, 0x10, 0x15, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x0F, 0x2F, 0xD1, 0x0F, 0x28, 0xC1,
+    0xF3, 0x0F, 0x58, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xF3, 0x0F, 0x11, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x76, 0x14, 0xF3, 0x0F, 0x10, 0x15, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xF3, 0x0F, 0x58, 0xD1
+};
+
+static BOOL resolve_camera_ease_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    CameraEaseLayout *ease = &game->camera_ease;
+    u32 blocks[2];
+    u32 i;
+
+    if (!FIND_UNIQUE(module, nt, g_camera_ease_phase_a_pattern, &blocks[0]) ||
+        !FIND_UNIQUE(module, nt, g_camera_ease_phase_b_pattern, &blocks[1])) {
+        return FALSE;
+    }
+    for (i = 0; i < 2; ++i) {
+        u32 limit;
+        u32 accel;
+        /* Both progress operands must name one global; constants in the image. */
+        if (load_u32(module + blocks[i] + 18u) != load_u32(module + blocks[i] + 26u) ||
+            !read_absolute_rva(module, game->pe_size_of_image, blocks[i] + 4u, &limit) ||
+            !read_absolute_rva(module, game->pe_size_of_image, blocks[i] + 36u, &accel)) {
+            return FALSE;
+        }
+        ease->limit_operands[i] = blocks[i] + 4u;
+        ease->accel_operands[i] = blocks[i] + 36u;
+    }
+    return TRUE;
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -1344,6 +1390,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_selection_panel_sites(module, nt, &game) ||
         !resolve_particle_draw_sites(module, nt, &game) ||
         !resolve_tracer_sites(module, nt, &game) ||
+        !resolve_camera_ease_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

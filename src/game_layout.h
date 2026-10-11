@@ -147,6 +147,16 @@ typedef struct TracerLayout {
     BranchSite tracer_update_call;
 } TracerLayout;
 
+typedef struct CameraEaseLayout {
+    /*
+     * Camera ease-to-object state machine (two phases): each phase does
+     * "progress += speed; if (speed < limit) speed += accel" once per client
+     * frame. RVAs of the limit and accel MOVSS operands, per phase.
+     */
+    u32 limit_operands[2];
+    u32 accel_operands[2];
+} CameraEaseLayout;
+
 typedef struct SelectionPanelLayout {
     /*
      * TacticalSelectionDetailsPanelImpl::SetUnitName (forwards only changed
@@ -211,6 +221,7 @@ typedef struct GameLayout {
     SelectionPanelLayout selection_panel;
     ParticleDrawLayout particle_draw;
     TracerLayout tracers;
+    CameraEaseLayout camera_ease;
 } GameLayout;
 
 typedef enum GameResolveResult {

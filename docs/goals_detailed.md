@@ -510,6 +510,29 @@ Many particles became smooth. Still at 30 Hz: infantry/watchtower bullets
 RenderObject distortion; round 2), Shockwave artillery blast (CPU ring
 **size** growth; round 2).
 
+### User feedback (round 2) and round 3 (implemented, needs a test)
+Bullets and trails confirmed smooth; the Shockwave ring is fixed. Still at
+30 Hz: the Ion Cannon **ball** that grows before the explosion, and some
+smoke disappears "glitchily". Also asked: fix the camera ease in advance.
+
+- **Ion Cannon ball** = `FXIonCannonExplosionSphere` (DRAWABLE/RenderObject,
+  InitialDelay 160, Lifetime 90). Its size is a 3D vector in
+  `RenderObjectParticleUpdateModule` (step 0x5AC37D: size +0x30..+0x38 +=
+  rate +0x10..+0x18, rotation +0x08), not the DefaultUpdate layout. Field
+  tables are now per draw kind (RenderObject: position, colour, alpha, size
+  xyz, rotation; others: position, colour, alpha, size, two rotations).
+- **Smoke pop:** the blend lagged one 30 Hz step, so a particle was removed
+  while its displayed state was still one step behind (e.g. not yet fully
+  faded). The draw now **projects forward**: `current + (current - previous)
+  × α`, with sizes/colour/alpha clamped at zero. There's no lag; a value
+  that fades linearly reaches its final state as the particle is removed.
+  (Trails keep their lerp.)
+- **Camera ease** (`CameraTransition_PerFrameAccel_0_03`, 0x828D30): two
+  phases, each "progress += speed; if (speed < limit) speed += accel" per
+  client frame (limits 0.5/0.4, accels 0.05/0.03, each read only here). The
+  four `MOVSS XMM2,[const]` operands are redirected to DLL floats: limit ×
+  dt, accel × dt², with dt = 30/targetFPS. Static writes are now 47.
+
 ### Not covered yet
 Swarm draw module (2 effects, own vertex buffer); 30 Hz emission batching of
 continuous streams (all types, including GPU particles).
