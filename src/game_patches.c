@@ -2330,6 +2330,61 @@ static void install_tracer_motion(PatchInstaller *installer) {
                  &tracers->tracer_update_call, 0xE8, call_patch, sizeof(call_patch));
 }
 
+/*
+ * Queued-order ("waypoint") lines, shown with Alt, start at the unit. The
+ * game reads that start from the Object's logic position, which only moves
+ * when logic updates it, while the unit itself is drawn at its interpolated
+ * position every frame; the line's start stepped behind the unit. During the
+ * line build the Object's position is temporarily the Drawable's
+ * interpolated position, then restored, so logic never sees it.
+ */
+typedef void(THISCALL *WaypointLineBuildFn)(void *buffer, u8 *object, u32 context);
+typedef const float *(THISCALL *InterpolatedTransformFn)(u8 *drawable);
+static WaypointLineBuildFn g_original_waypoint_line_build;
+static InterpolatedTransformFn g_interpolated_transform;
+
+static void THISCALL build_waypoint_line_from_drawn_unit(void *buffer, u8 *object,
+                                                        u32 context) {
+    const WaypointLineLayout *lines = &g_game->waypoint_lines;
+    u8 *drawable;
+    float *position;
+    float saved[3];
+    const float *transform;
+
+    if (object == NULL || g_config->target_fps <= g_retail_visual_fps) {
+        g_original_waypoint_line_build(buffer, object, context);
+        return;
+    }
+    drawable = *(u8 **)(object + lines->object_drawable);
+    if (drawable == NULL || *(u8 **)(drawable + lines->drawable_object) != object) {
+        g_original_waypoint_line_build(buffer, object, context);
+        return;
+    }
+    transform = g_interpolated_transform(drawable);
+    position = (float *)(object + lines->object_position);
+    memcpy(saved, position, sizeof(saved));
+    /* Matrix3D rows: translation is the fourth float of each. */
+    position[0] = transform[3];
+    position[1] = transform[7];
+    position[2] = transform[11];
+    g_original_waypoint_line_build(buffer, object, context);
+    memcpy(position, saved, sizeof(saved));
+}
+
+static void install_waypoint_lines(PatchInstaller *installer) {
+    const WaypointLineLayout *lines = &g_game->waypoint_lines;
+    u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
+
+    g_original_waypoint_line_build =
+        (WaypointLineBuildFn)game_address(g_game, lines->line_call.target);
+    g_interpolated_transform = (InterpolatedTransformFn)game_address(
+        g_game, lines->interpolated_transform_function);
+    encode_rel32(&call_patch[1], game_address(g_game, lines->line_call.instruction + 5u),
+                 build_waypoint_line_from_drawn_unit);
+    patch_branch(installer, "waypoint line build call", &lines->line_call, 0xE8, call_patch,
+                 sizeof(call_patch));
+}
+
 static void install_minimap_glide(PatchInstaller *installer) {
     static const char *const names[MINIMAP_LOOK_AT_MAX][MINIMAP_LOOK_AT_CALLS] = {
         { "minimap look-at call 1", "minimap look-at call 2" },
@@ -2751,6 +2806,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_shroud_timing(&installer);
     install_tint_envelope_timing(&installer);
     install_minimap_glide(&installer);
+    install_waypoint_lines(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);

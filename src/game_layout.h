@@ -256,6 +256,21 @@ typedef struct MinimapLayout {
     u32 view_pointer;
 } MinimapLayout;
 
+typedef struct WaypointLineLayout {
+    /*
+     * Queued-order ("waypoint") lines: the per-object draw callback's call of
+     * the line builder (TW 1.10 VA 0x833924 -> 0x833699), which starts the
+     * line at the Object's logic position. Offsets of that position in the
+     * Object, of the Object's Drawable, of the Drawable's Object back-pointer,
+     * and Drawable::getInterpolatedTransform (thiscall, returns Matrix3D*).
+     */
+    BranchSite line_call;
+    u32 object_position;
+    u32 object_drawable;
+    u32 drawable_object;
+    u32 interpolated_transform_function;
+} WaypointLineLayout;
+
 typedef struct SelectionPanelLayout {
     /*
      * TacticalSelectionDetailsPanelImpl::SetUnitName (forwards only changed
@@ -324,6 +339,7 @@ typedef struct GameLayout {
     ShroudLayout shroud;
     TintEnvelopeLayout tint_envelope;
     MinimapLayout minimap;
+    WaypointLineLayout waypoint_lines;
 } GameLayout;
 
 typedef enum GameResolveResult {

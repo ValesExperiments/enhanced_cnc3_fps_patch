@@ -772,7 +772,8 @@ rocket pods** have an abnormally fast idle animation.
 
 ## B10. Minimap drag pans the camera at 30 Hz
 
-**Status:** round 4 implemented 2026-10-11, needs an in-game test.
+**Status:** done; round 4 confirmed by the user as the best version
+(2026-10-11).
 
 - Clicking the minimap moves the camera there; holding and dragging pans it.
   `RadarImpl::InputHandler` (vtable TW 0xABF160) forwards mouse moves (slot
@@ -819,6 +820,32 @@ rocket pods** have an abnormally fast idle animation.
 - Kane's Wrath has two radar look-at copies (two radar implementations), so
   the resolver accepts one or two, each with exactly two direct CALLs and the
   same view global. Patch capacity raised to 96 (KW now installs 63 writes).
+
+---
+
+## B11. Queued-order (Alt) waypoint lines step behind the unit
+
+**Status:** implemented 2026-10-11, needs an in-game test.
+
+- With Alt, queued move/attack orders are shown as tan lines (texture
+  `EXLaser`, node model `SCMoveHintSml`) from the unit through each order.
+  TW 1.10: the per-frame draw (0x834AAD) scrolls the texture by
+  `timeGetTime`, then for each selected unit (or all, by mode) calls the
+  per-object callback 0x833902, which calls the line builder 0x833699
+  (`thiscall(buffer, Object*, ctx)`, `RET 8`). The builder copies the start
+  point from `Object+0x38/+0x3C/+0x40`, the **logic** position, which only
+  changes when logic updates it, while the unit is drawn interpolated.
+- Fix: that call is redirected to `build_waypoint_line_from_drawn_unit`. If
+  `Object→Drawable` (TW `+0x104`, KW `+0x108`) round-trips via the
+  Drawable's Object back-pointer (`+0x140`), the Object's position is
+  temporarily set to `Drawable::getInterpolatedTransform` (TW 0x48187A;
+  translation at matrix floats 3/7/11), the builder runs, and the position
+  is restored.
+- Resolver: the callback's bytes (call at +34); the builder's prologue,
+  whose three `MOVSS XMM0,[ESI+n]` must be consecutive (n = 0x38); the
+  interpolation function (back-pointer offset at +5); and the particle-attach
+  code `MOV EDI,[ESI+off]; …; MOV ECX,EDI; CALL getInterpolatedTransform`
+  for the Object→Drawable offset. Verified on all four builds.
 
 ---
 

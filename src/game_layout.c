@@ -1682,6 +1682,81 @@ static BOOL resolve_minimap_sites(
     return minimap->count >= 1u;
 }
 
+/* Per-object waypoint-line callback: skip hidden objects, then build its line. */
+static const u16 g_waypoint_line_site_pattern[] = {
+    0x8B, 0x4C, 0x24, 0x04, 0x85, 0xC9, 0x74, 0x1F, 0x8B, 0x41, 0x04,
+    0x8B, 0x80, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xC1, 0xE8, 0x11, 0xA8, 0x01, 0x75, 0x0F, 0x8B, 0x44, 0x24, 0x08,
+    0xFF, 0x70, 0x04, 0x51, 0x8B, 0x08, 0xE8
+};
+/* Line builder: ... MOVSS XMM0,[ESI+pos] / +4 / +8 copies the start point. */
+static const u16 g_waypoint_line_builder_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x4C, 0x53, 0x56, 0x8B, 0x75, 0x08, 0x85, 0xF6,
+    0x8B, 0xD9, 0x0F, 0x84, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x57,
+    0xFF, 0xB6, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0xF8, 0x85, 0xFF, 0x89, 0x7D, 0xEC, 0x0F, 0x84, PATTERN_ANY, PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, 0x8B, 0x47, 0x04, 0x39, 0x00,
+    0x0F, 0x84, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x83, 0x63, 0x1C, 0x00,
+    0xF3, 0x0F, 0x10, 0x46, PATTERN_ANY, 0xF3, 0x0F, 0x11, 0x45, 0xD8,
+    0xF3, 0x0F, 0x10, 0x46, PATTERN_ANY, 0xF3, 0x0F, 0x11, 0x45, 0xDC,
+    0xF3, 0x0F, 0x10, 0x46, PATTERN_ANY
+};
+/* Drawable::getInterpolatedTransform: no Object (+off) -> own matrix (+8). */
+static const u16 g_interpolated_transform_pattern[] = {
+    0x56, 0x8B, 0xF1, 0x83, 0xBE, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00,
+    0x75, 0x05, 0x8D, 0x46, 0x08, 0x5E, 0xC3, 0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, 0x8B, 0x01, 0x53, 0xFF, 0x50, 0x78
+};
+/* Particle attach: EDI = Object's Drawable (+off); ...; getInterpolatedTransform(EDI). */
+static const u16 g_object_drawable_pattern[] = {
+    0x8B, 0xBE, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x83, 0xF8, 0x03,
+    0x0F, 0x9D, 0x45, 0xFF, 0x85, 0xFF, 0x74, PATTERN_ANY,
+    0xF6, 0x87, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x20, 0x75, 0x04,
+    0xC6, 0x45, 0xFE, 0x01, 0x8B, 0xCF, 0xE8
+};
+
+static BOOL resolve_waypoint_line_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    WaypointLineLayout *lines = &game->waypoint_lines;
+    u32 image_size = game->pe_size_of_image;
+    u32 match;
+    u32 builder;
+    u32 interp_call;
+
+    if (!FIND_UNIQUE(module, nt, g_waypoint_line_site_pattern, &match)) return FALSE;
+    lines->line_call.instruction = match + 34u;
+    if (!decode_relative_target(module, image_size, lines->line_call.instruction, 0xE8,
+                                &lines->line_call.target)) {
+        return FALSE;
+    }
+    builder = lines->line_call.target;
+    if (builder > image_size - ARRAY_COUNT(g_waypoint_line_builder_pattern) ||
+        !pattern_matches(module + builder, g_waypoint_line_builder_pattern,
+                         ARRAY_COUNT(g_waypoint_line_builder_pattern))) {
+        return FALSE;
+    }
+    /* The three MOVSS loads must read consecutive floats. */
+    lines->object_position = module[builder + 71u];
+    if (module[builder + 81u] != lines->object_position + 4u ||
+        module[builder + 91u] != lines->object_position + 8u) {
+        return FALSE;
+    }
+
+    if (!FIND_UNIQUE(module, nt, g_interpolated_transform_pattern,
+                     &lines->interpolated_transform_function) ||
+        !FIND_UNIQUE(module, nt, g_object_drawable_pattern, &match) ||
+        !decode_relative_target(module, image_size, match + 32u, 0xE8, &interp_call) ||
+        interp_call != lines->interpolated_transform_function) {
+        return FALSE;
+    }
+    lines->drawable_object = load_u32(module + lines->interpolated_transform_function + 5u);
+    lines->object_drawable = load_u32(module + match + 2u);
+    return lines->drawable_object < 0x1000u && lines->object_drawable < 0x1000u &&
+           lines->object_position < 0x100u;
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -1898,6 +1973,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_shroud_sites(module, nt, &game) ||
         !resolve_tint_envelope_sites(module, nt, &game) ||
         !resolve_minimap_sites(module, nt, &game) ||
+        !resolve_waypoint_line_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||
