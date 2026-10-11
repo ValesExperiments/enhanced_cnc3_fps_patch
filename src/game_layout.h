@@ -117,6 +117,22 @@ typedef struct DrawableInterpolationLayout {
     u32 window_immediates[2];
 } DrawableInterpolationLayout;
 
+typedef struct SelectionPanelLayout {
+    /*
+     * TacticalSelectionDetailsPanelImpl::SetUnitName (forwards only changed
+     * names), its vtable entry, and the helper that pushes "UnitName" to APT.
+     */
+    u32 set_unit_name_function;
+    u32 set_unit_name_vtable_entry;
+    u32 push_unit_name_function;
+    /* TacticalSelectionDetailsPanelImpl::SetState (vtable slot 1). */
+    u32 set_state_function;
+    u32 set_state_vtable_entry;
+    /* SelectionDetails::PanelImpl::SingleUnitModeHandler per-frame update. */
+    u32 single_unit_update_function;
+    u32 single_unit_update_vtable_entry;
+} SelectionPanelLayout;
+
 typedef struct ObjectiveUiLayout {
     /* Global AptPlayer* stored by the AptPlayer constructor. */
     u32 apt_player_pointer;
@@ -162,6 +178,7 @@ typedef struct GameLayout {
     ObjectiveUiLayout objective_ui;
     DrawablePhysicsLayout drawable_physics;
     DrawableInterpolationLayout drawable_interpolation;
+    SelectionPanelLayout selection_panel;
 } GameLayout;
 
 typedef enum GameResolveResult {
@@ -203,6 +220,14 @@ enum {
      * executes before the frame is drawn.
      */
     APT_PLAYER_FORCE_TICK = 0x01E9,
+    /* APT gadget "OnInitialized has run" flag, e.g. in the selection panel. */
+    APT_GADGET_INITIALIZED = 0x14,
+    /* SingleUnitModeHandler -> SelectionDetails::PanelImpl -> panel gadget. */
+    SELECTION_HANDLER_PANEL = 0x14,
+    SELECTION_PANEL_GADGET = 0x14,
+    /* Panel gadget's current state, and the handler's "rebuild buttons" flag. */
+    SELECTION_PANEL_STATE = 0x3C,
+    SELECTION_HANDLER_REBUILD_BUTTONS = 0x40,
     ADD_INDICATOR_COUNT = 3,
 
     /* W3DView/CNC3_View virtual slots used by the camera wrappers. */

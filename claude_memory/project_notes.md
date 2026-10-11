@@ -101,6 +101,30 @@ Fix or remove anything that turns out to be wrong.
   Add a targeted diagnostic early when timing is unclear. Tell the user to
   *edit* an existing INI key, never add a duplicate, because
   GetPrivateProfileInt reads the first occurrence.
+- **C++ → APT traffic is deferred** to ~30 Hz APT ticks (pending variable
+  table with last-value-wins, queued calls). APT gadgets that forward values
+  "only when changed" can lose updates at high FPS (B6 "Unit Name"). Prefer
+  re-sending over trusting change checks.
+- **The user's display path:** their own DXVK 3.1.1-based DLSS mod
+  (`RetailExe/1.10/d3d9.dll`, logs in `RetailExe/1.10/logs/`), exclusive
+  fullscreen, FIFO/V-Sync, and DXVK's built-in limiter active. G-Sync doesn't
+  engage, so judder at 90 FPS on 160 Hz is expected. Check the DXVK log before
+  blaming the patch for pacing issues.
+- **DXVK:** the user wants DXVK builds from source (stock DXVK doesn't lock
+  the cursor in fullscreen, which breaks edge scrolling). Reference clone:
+  `tools_and_docs_by_claude/gitignored/dxvk` (v3.1.1, never modified). Our
+  copy, patch and build live in `tools_and_docs_by_claude/dxvk_cursorlock/`
+  (MSVC VS 2026 x86 via `build_dxvk.bat`, about 2 min). DXVK's own limiter in
+  fullscreen + V-Sync caps at the display refresh rate; that's normal and not
+  a pacing bug. "Prefer layered on DXGI swapchain" didn't make G-Sync engage.
+  **User preference: borderless, not full-screen exclusive.** Don't enable
+  `dxvk.allowFse`. Upstream DXVK disallows FSE by default and notes that FSE is
+  required for VRR/HDR on Windows; borderless VRR then depends on the NVIDIA
+  driver's layered-DXGI path (independent flip). **Solved:** our build passes
+  `VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT` (option `dxvk.fseDriverDefault`,
+  default on) instead of DISALLOWED. G-Sync then works borderless with
+  windowed G-Sync off (the user keeps it off because a 60 Hz second monitor
+  breaks it).
 - **Patch-write budget:** `PATCH_TRANSACTION_CAPACITY` (src/memory_patch.h)
   limits how many static writes one install may make (raised from 32 to 64
   on 2026-10-11, when 33 writes silently pushed the game back to 30 FPS).

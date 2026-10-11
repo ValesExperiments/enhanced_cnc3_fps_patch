@@ -21,7 +21,9 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 |---|------|--------|
 | B1 | Objective markers should not glitch for a few frames when they appear on screen in missions | **Done** (confirmed in-game 2026-10-11) |
 | B2 | Procedural unit motion (vehicle turning, suspension and body wobble) should look the same as at 30 FPS, not exaggerated | **Done** (Surveyor bobbing fixed, confirmed 2026-10-11) |
-| B4 | All moving vehicles and aircraft should move smoothly (a small stutter is visible at 90 FPS) | Fix implemented, **needs in-game test** |
+| B4 | All moving vehicles and aircraft should move smoothly (a small stutter is visible at 90 FPS) | **Done** (confirmed 2026-10-11) |
+| B5 | No random small hitches; camera scrolling as smooth as unit movement | **Solved** with our DXVK build (G-Sync works borderless; confirmed 2026-10-11) |
+| B6 | Selected unit/building panel must never show the placeholder name "Unit name" | Fix attempt 3 implemented, **needs in-game test** |
 | B3 | Particles should move smoothly at the render rate rather than in 30 Hz steps (e.g. by interpolation) | Not started |
 | F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | Not started |
 
@@ -43,10 +45,16 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 - **B2 (fixed):** The locomotor tilt/suspension springs ran once
   per rendered frame. They now run at the retail 30 Hz, and the result is
   smoothly blended in between.
-- **B4 (root cause measured):** The game only refreshes a unit's smoothed
+- **B4 (fixed):** The game only refreshes a unit's smoothed
   position for 6 drawn frames after it moves. That's 3 logic ticks at 30 FPS
   but only 1 at 90, so every 6th frame froze, and stopped units were left
   short and then snapped. The window now scales with FPS.
+- **B5 (solved):** The judder came from G-Sync not engaging under DXVK. Our DXVK
+  build lets the NVIDIA driver handle the borderless window like a native Vulkan
+  game, and G-Sync now works.
+- **B6 (attempt 3):** Only happens at high FPS, production building → deselect →
+  another production building. At 30 FPS one Flash frame always ran between the
+  panel's C++ steps; now each state change and button rebuild forces one.
 - **B3:** The patch deliberately runs CPU particle simulation at 30 Hz. The
   plan is to keep it there and interpolate (or extrapolate) particle positions
   when drawing.

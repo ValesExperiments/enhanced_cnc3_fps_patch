@@ -921,6 +921,115 @@ static BOOL resolve_drawable_interpolation_sites(
     return matches == ARRAY_COUNT(interp->window_immediates);
 }
 
+/*
+ * TacticalSelectionDetailsPanelImpl::SetUnitName(name): stores the name at
+ * +0x40 and, only if it changed and the gadget is initialized (+0x14), calls
+ * the helper that pushes the "UnitName" APT variable.
+ */
+static const u16 g_set_unit_name_pattern[] = {
+    0x56, 0x8B, 0xF1, 0x8B, 0x4C, 0x24, 0x08, 0x57, 0x8D, 0x7E, 0x40, 0x57,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x85, 0xC0, 0x74, 0x18, 0xFF, 0x74, 0x24, 0x0C, 0x8B, 0xCF,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x80, 0x7E, 0x14, 0x00, 0x74, 0x07, 0x8B, 0xCE,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x5F, 0x5E, 0xC2, 0x04, 0x00
+};
+/* SetState(state): returns early unless state differs from +0x3C. */
+static const u8 g_set_state_prologue[] = {
+    0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0x8B, 0xF1, 0x3B, 0x7E, 0x3C, 0x74, 0x63,
+    0x85, 0xFF, 0x75, 0x1A, 0x80, 0x7E, 0x70, 0x00, 0x74, 0x14
+};
+/* Push helper: LEA EAX,[ECX+40h]; PUSH EAX; LEA EAX,[ECX+0Ch]; PUSH "UnitName". */
+static const u8 g_push_unit_name_prefix[] = {
+    0x8D, 0x41, 0x40, 0x50, 0x8D, 0x41, 0x0C, 0x68
+};
+
+/*
+ * SingleUnitModeHandler per-frame update: optional production/exit button
+ * rebuild (+0x40 flag), then rank, portrait/ammo updates and button loops.
+ */
+static const u16 g_single_unit_update_pattern[] = {
+    0x53, 0x56, 0x8B, 0xF1, 0x80, 0x7E, 0x40, 0x00, 0x57, 0x74, 0x18,
+    0x8D, 0x4E, 0x1C, 0xFF, 0x71, 0x04, 0xFF, 0x31,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0xCE, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xC6, 0x46, 0x40, 0x00,
+    0x8B, 0xCE, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0xCE, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0xCE, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x5E, 0x20, 0x8B, 0x7E, 0x1C, 0xEB, 0x0A,
+    0x8B, 0x0F, 0x8B, 0x01, 0xFF, 0x50, 0x04, 0x83, 0xC7, 0x04, 0x3B, 0xFB, 0x75, 0xF2
+};
+
+static BOOL resolve_selection_panel_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    static const char unit_name[] = "UnitName";
+    SelectionPanelLayout *panel = &game->selection_panel;
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u32 image_size = game->pe_size_of_image;
+    u32 matches = 0;
+    u16 section_index;
+
+    /* Similar setters exist; keep only the one whose helper names "UnitName". */
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections;
+         ++section_index, ++section) {
+        u32 start = section->VirtualAddress;
+        u32 size = section->Misc.VirtualSize;
+        u32 offset;
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
+            start >= image_size || size > image_size - start ||
+            size < ARRAY_COUNT(g_set_unit_name_pattern)) {
+            continue;
+        }
+        for (offset = 0; offset <= size - (u32)ARRAY_COUNT(g_set_unit_name_pattern);
+             ++offset) {
+            u32 function = start + offset;
+            u32 helper;
+            u32 string_rva;
+            if (!pattern_matches(module + function, g_set_unit_name_pattern,
+                                 ARRAY_COUNT(g_set_unit_name_pattern)) ||
+                !decode_relative_target(module, image_size, function + 40u, 0xE8, &helper) ||
+                helper > image_size - sizeof(g_push_unit_name_prefix) - 4u ||
+                memcmp(module + helper, g_push_unit_name_prefix,
+                       sizeof(g_push_unit_name_prefix)) != 0 ||
+                !read_absolute_rva(module, image_size,
+                                   helper + (u32)sizeof(g_push_unit_name_prefix),
+                                   &string_rva) ||
+                string_rva > image_size - sizeof(unit_name) ||
+                memcmp(module + string_rva, unit_name, sizeof(unit_name)) != 0) {
+                continue;
+            }
+            if (++matches > 1) return FALSE;
+            panel->set_unit_name_function = function;
+            panel->push_unit_name_function = helper;
+        }
+    }
+    if (matches != 1 ||
+        !find_unique_readonly_pointer(
+            module, nt, (u32)(uintptr_t)(module + panel->set_unit_name_function),
+            &panel->set_unit_name_vtable_entry) ||
+        panel->set_unit_name_vtable_entry < 4u * sizeof(u32)) {
+        return FALSE;
+    }
+    /* SetState is slot 1 of the same vtable (SetUnitName is slot 5). */
+    panel->set_state_vtable_entry = panel->set_unit_name_vtable_entry - 4u * sizeof(u32);
+    if (!absolute_operand_to_rva(module, image_size,
+                                 load_u32(module + panel->set_state_vtable_entry),
+                                 &panel->set_state_function) ||
+        panel->set_state_function > image_size - sizeof(g_set_state_prologue) ||
+        memcmp(module + panel->set_state_function, g_set_state_prologue,
+               sizeof(g_set_state_prologue)) != 0) {
+        return FALSE;
+    }
+    return
+           FIND_UNIQUE(module, nt, g_single_unit_update_pattern,
+                       &panel->single_unit_update_function) &&
+           find_unique_readonly_pointer(
+               module, nt, (u32)(uintptr_t)(module + panel->single_unit_update_function),
+               &panel->single_unit_update_vtable_entry);
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -1075,6 +1184,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_objective_ui_sites(module, nt, &game) ||
         !resolve_drawable_physics_sites(module, nt, &game) ||
         !resolve_drawable_interpolation_sites(module, nt, &game) ||
+        !resolve_selection_panel_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

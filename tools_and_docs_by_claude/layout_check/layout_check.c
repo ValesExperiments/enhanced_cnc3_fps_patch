@@ -138,6 +138,7 @@ static int check(const char *path) {
         { "objective_ui", resolve_objective_ui_sites },
         { "drawable_physics", resolve_drawable_physics_sites },
         { "drawable_interpolation", resolve_drawable_interpolation_sites },
+        { "selection_panel", resolve_selection_panel_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;

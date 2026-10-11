@@ -459,6 +459,41 @@ static void THISCALL update_particles_at_retail_rate(void *manager) {
  * remainder accumulator distributes that integer budget without replacing
  * the game's timeGetTime/Sleep(0), no-limit, telemetry, or history paths.
  */
+/*
+ * Diagnostic (debug_frame_times > 0): one line per client frame from inside
+ * the stock limiter: real time since the previous frame (QPC, µs), the
+ * limiter's planned interval, the logic phase, timeGetTime (its step size
+ * shows the effective timer resolution), and the adaptive multiplier.
+ */
+static u32 g_frame_times_logged;
+static LARGE_INTEGER g_frame_time_previous;
+static LARGE_INTEGER g_frame_time_frequency;
+
+static void log_frame_time_sample(u8 *engine, u32 interval, u32 multiplier) {
+    LARGE_INTEGER now;
+    double delta_us = 0.0;
+
+    if (g_config == NULL || g_config->debug_frame_times == 0 ||
+        g_frame_times_logged >= g_config->debug_frame_times) {
+        return;
+    }
+    QueryPerformanceCounter(&now);
+    if (g_frame_times_logged == 0) {
+        QueryPerformanceFrequency(&g_frame_time_frequency);
+        log_line("frame log: dt_us planned_ms phase timeGetTime multiplier");
+    } else {
+        delta_us = (double)(now.QuadPart - g_frame_time_previous.QuadPart) *
+                   1000000.0 / (double)g_frame_time_frequency.QuadPart;
+    }
+    g_frame_time_previous = now;
+    log_printf("F %.0f %u %u %u %u", delta_us, interval,
+               *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE),
+               (u32)timeGetTime(), multiplier);
+    if (++g_frame_times_logged == g_config->debug_frame_times) {
+        log_line("frame log: complete");
+    }
+}
+
 static u32 STDCALL get_retail_limiter_interval(void *engine_pointer) {
     const PacingLayout *pacing;
     i32 signed_multiplier;
@@ -507,7 +542,9 @@ static u32 STDCALL get_retail_limiter_interval(void *engine_pointer) {
     scaled = g_limiter_interval_remainder + logic_cycle_budget_ms;
     interval = scaled / multiplier;
     g_limiter_interval_remainder = scaled % multiplier;
-    return interval != 0u ? interval : 1u;
+    if (interval == 0u) interval = 1u;
+    log_frame_time_sample((u8 *)engine_pointer, interval, multiplier);
+    return interval;
 }
 
 /*
@@ -564,6 +601,64 @@ static void **THISCALL add_offscreen_indicator(void *stage, void **out, void *ta
 
 static void **THISCALL add_waypoint_indicator(void *stage, void **out, void *target) {
     return add_indicator_with_apt_tick(2, stage, out, target);
+}
+
+/*
+ * The selection-details panel forwards a unit name to APT only when it
+ * differs from the previous one. Deselecting and quickly reselecting the
+ * same object makes the panel's Flash clip reset its name field, and at high
+ * FPS several client frames of panel updates reach APT in one ~30 Hz tick.
+ * The unchanged name was then never re-sent and the placeholder "Unit Name"
+ * stayed. Re-send it every time the panel is told its name.
+ */
+typedef void(THISCALL *SetUnitNameFn)(void *panel, void *name);
+typedef void(THISCALL *PushUnitNameFn)(void *panel);
+static SetUnitNameFn g_original_set_unit_name;
+static PushUnitNameFn g_push_unit_name;
+
+static void THISCALL set_unit_name_always_push(void *panel, void *name) {
+    g_original_set_unit_name(panel, name);
+    if (((u8 *)panel)[APT_GADGET_INITIALIZED] != 0) g_push_unit_name(panel);
+}
+
+/*
+ * Production buildings rebuild their exit/production buttons on a later
+ * frame than the name push, and that Flash layout pass can reset the name
+ * field again. While a single object is selected, re-send the name every
+ * client frame (the stock update already re-sends rank and ammo each frame),
+ * so any reset is corrected on the next APT tick.
+ */
+typedef void(THISCALL *SingleUnitUpdateFn)(void *handler);
+static SingleUnitUpdateFn g_original_single_unit_update;
+
+/*
+ * Selecting an object runs in two C++ steps on consecutive client frames:
+ * the panel state/name/production setup, then the production/exit button
+ * rebuild. Deselecting tears the production UI down the same way. At 30 FPS
+ * one APT (Flash) frame always ran between such steps; at high FPS several
+ * steps reached the panel within one APT frame, and switching from one
+ * production building to another left the name field on its "Unit Name"
+ * placeholder. Give each step its own APT frame, as at 30 FPS.
+ */
+typedef void(THISCALL *SetPanelStateFn)(void *panel, int state);
+static SetPanelStateFn g_original_set_panel_state;
+
+static void THISCALL set_panel_state_with_apt_tick(void *panel, int state) {
+    int previous = *(int *)((u8 *)panel + SELECTION_PANEL_STATE);
+    g_original_set_panel_state(panel, state);
+    if (previous != state) request_apt_tick();
+}
+
+static void THISCALL single_unit_update_with_name(void *handler) {
+    u8 *panel_impl;
+    u8 *gadget;
+
+    if (((u8 *)handler)[SELECTION_HANDLER_REBUILD_BUTTONS] != 0) request_apt_tick();
+    g_original_single_unit_update(handler);
+    panel_impl = *(u8 **)((u8 *)handler + SELECTION_HANDLER_PANEL);
+    if (panel_impl == NULL) return;
+    gadget = *(u8 **)(panel_impl + SELECTION_PANEL_GADGET);
+    if (gadget != NULL && gadget[APT_GADGET_INITIALIZED] != 0) g_push_unit_name(gadget);
 }
 
 static void reset_keyboard_clock(void) {
@@ -817,6 +912,30 @@ static void install_audio_timing(PatchInstaller *installer) {
     patch_pointer(installer, "SageAudioManager update vtable entry",
                   audio->update_vtable_entry,
                   update_function, update_audio_at_retail_rate);
+}
+
+static void install_selection_panel_name(PatchInstaller *installer) {
+    const SelectionPanelLayout *panel = &g_game->selection_panel;
+    void *original = game_address(g_game, panel->set_unit_name_function);
+
+    g_original_set_unit_name = (SetUnitNameFn)original;
+    g_push_unit_name = (PushUnitNameFn)game_address(
+        g_game, panel->push_unit_name_function);
+    patch_pointer(installer, "SetUnitName vtable entry",
+                  panel->set_unit_name_vtable_entry, original,
+                  (const void *)set_unit_name_always_push);
+
+    original = game_address(g_game, panel->set_state_function);
+    g_original_set_panel_state = (SetPanelStateFn)original;
+    patch_pointer(installer, "selection panel SetState vtable entry",
+                  panel->set_state_vtable_entry, original,
+                  (const void *)set_panel_state_with_apt_tick);
+
+    original = game_address(g_game, panel->single_unit_update_function);
+    g_original_single_unit_update = (SingleUnitUpdateFn)original;
+    patch_pointer(installer, "SingleUnitModeHandler update vtable entry",
+                  panel->single_unit_update_vtable_entry, original,
+                  (const void *)single_unit_update_with_name);
 }
 
 static void install_objective_indicator_tick(PatchInstaller *installer) {
@@ -1212,6 +1331,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_keyboard_timing(&installer);
     install_audio_timing(&installer);
     install_objective_indicator_tick(&installer);
+    install_selection_panel_name(&installer);
     install_camera_timing(&installer);
     install_frame_authored_effects(&installer);
     install_drawable_physics_timing(&installer);
@@ -1284,6 +1404,7 @@ void game_patches_reset_state(void) {
         memset(g_physics_cache, 0, sizeof(g_physics_cache));
         /* Each session may follow a new vehicle for the motion diagnostic. */
         g_motion_drawable = NULL;
+        g_frame_times_logged = 0;
         reset_keyboard_clock();
         /* First direct reader gets floor(990/FPS); the hook distributes remainder. */
         *(u32 *)game_address(g_game, g_game->timing.w3d_milliseconds_per_frame) =

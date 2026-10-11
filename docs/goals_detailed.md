@@ -6,7 +6,7 @@ for each bug, how to investigate them, candidate fixes, and acceptance
 criteria. Sections are updated as the work progresses. Superseded hypotheses
 are struck out or removed rather than piled up.
 
-Last updated: 2026-10-11 (B1 fixed; B2 root cause found and fix implemented).
+Last updated: 2026-10-11 (B1, B2, B4 fixed; B5 diagnosed; B6 fix implemented).
 
 ---
 
@@ -233,8 +233,7 @@ and an aircraft too.
 
 ## B4. All vehicles and aircraft stutter slightly while moving (90 FPS)
 
-**Status:** root cause measured and fix implemented (2026-10-11). It still
-needs an in-game test. The user's clue: units **snap** into place when they
+**Status:** fixed. Confirmed in-game on 2026-10-11. The user's clue: units **snap** into place when they
 stop.
 
 ### Measurement (debug_motion_frames, harvester at 90 FPS; temp/logs/motion_run2.log)
@@ -303,6 +302,136 @@ These are TW 1.10 offsets; they may be wrong on KW.
   client frame from the frame its new history pair arrived, clamped at 1.
   This is timing-independent and lands exactly on the final position when a
   unit stops.
+
+---
+
+## B5. Random small hitches and camera judder (90 FPS)
+
+**Status:** solved (2026-10-11). With our DXVK build (`dxvk.fseDriverDefault`,
+driver-default FSE mode) G-Sync engages in borderless and the user reports the
+game as "buttery smooth" (it acts semi-borderless, which they accept).
+
+Frame log (`debug_frame_times=3600`, 40 s skirmish; temp/logs/frames_run1.log):
+mean 11.11 ms, p1–p99 9.8–12.4 ms, no frame over 20 ms except the first two
+after the session starts. The limiter always plans 11 ms; timeGetTime
+resolution is ~1 ms. The game produces frames evenly.
+
+Display path (the user's DXVK 3.1.1-based DLSS mod `d3d9.dll`; its log in
+`RetailExe/1.10/logs/`): exclusive fullscreen, `VK_PRESENT_MODE_FIFO_KHR`
+(V-Sync), 3 images, and the warning **"Built-in frame rate limiter
+enabled"**. G-Sync doesn't engage (user), so 90 FPS on a fixed 160 Hz refresh
+alternates frames between 1 and 2 refreshes (6.25/12.5 ms). That's the
+visible judder/hitching, worst when panning the camera. Three pacing
+mechanisms are stacked: game limiter, DXVK limiter, and V-Sync.
+
+Recommendations (outside this patch):
+1. Get VRR working with Vulkan/DXVK: NVIDIA Control Panel → G-SYNC for
+   full-screen (and windowed); Manage 3D settings → "Vulkan/OpenGL present
+   method" = "Prefer layered on DXGI swapchain"; check with the G-SYNC
+   indicator overlay.
+2. Find why DXVK's built-in limiter is active (display-mode `@0` handling)
+   and disable it, leaving the game's limiter in charge.
+3. Without VRR, use a frame rate that divides the refresh rate (80 or 160 FPS
+   on 160 Hz), which needs F1's arbitrary/fractional rates.
+
+G-Sync investigation (2026-10-11):
+- DXVK's limiter warning is benign. In fullscreen with V-Sync, DXVK caps at
+  the display refresh rate (`UpdateTargetFrameRate`: `-m_displayRefreshRate`),
+  i.e. 160, which never affects 90 FPS.
+- DXVK disallows Vulkan full-screen exclusive unless `dxvk.allowFse = True`.
+  Its source notes that FSE is required for VRR/HDR on Windows. **The user
+  prefers borderless**, so FSE isn't used.
+- Borderless VRR with Vulkan on NVIDIA therefore depends on the driver's
+  "Prefer layered on DXGI swapchain" path reaching independent flip (the
+  window exactly covers the monitor, nothing overlaps it, no injected
+  overlays). The user tried that setting without success (likely profile
+  scope, overlays, or the DLSS mod's presentation path). To test with the
+  plain cursor-lock DXVK build: setting in the Global profile, G-SYNC for
+  windowed and full screen, G-SYNC indicator on, overlays off.
+
+Possible patch improvement later: sub-millisecond (QPC) pacing for even
+smoother VRR output (±1 ms jitter today). F1 needs this anyway.
+
+## B6. Selection panel sometimes shows "Unit name"
+
+**Status:** fix implemented (2026-10-11). It still needs an in-game test.
+
+Evidence: two screenshots of the same Barracks, 4 s apart. One shows
+"Barracks" and the other the placeholder "Unit Name", both with the correct
+portrait. The user thinks they clicked empty ground in between.
+
+Mechanism (TW 1.10 VAs):
+- `SelectionDetails::PanelImpl`: deselect → `FUN_0079133c` destroys the mode
+  handler and calls `gadget->SetState(0)`. Reselect → a new
+  `SingleUnitModeHandler` (ctor 0x792EE1) calls `SetState(1)`, then
+  `SetUnitName(name)` (+0x14), category, weapon, … Re-selecting the same
+  single object is ignored entirely (slot 3, 0x793154).
+- `TacticalSelectionDetailsPanelImpl` (vtable 0xABDDFC) forwards every
+  property only when it changes. `SetUnitName` (0x79D708) keeps the old name
+  at +0x40, so reselecting the same building after a deselect never re-sends
+  `UnitName`, while the Flash panel's close/open cycle reset its text field.
+  C++ → APT traffic is deferred to ~30 Hz APT ticks
+  (`FUN_00773d27`: pending variable table, last value wins;
+  `FUN_00773a92`: queued call). At 90 FPS, three frames of updates merge per
+  tick, which makes this race common.
+
+Fix: the `SetUnitName` vtable entry is redirected to
+`set_unit_name_always_push`. It runs the stock setter, then (if the gadget is
+initialized, +0x14) always calls the stock "push UnitName" helper
+(0x79D05E). Resolution: the full 50-byte setter signature, plus "its third
+call's helper pushes the string `UnitName`", unique; the vtable entry is the
+unique read-only pointer. Verified offline on TW 1.10, TW 1.9, KW 1.03 and
+KW 1.02. Static writes are now 34.
+
+If other panel fields (category/weapon icons) ever show defaults after a
+reselect, extend the same treatment to their setters.
+
+**Retest 1 (user):** still happens, but only after deselecting and only for
+**buildings with production** (Barracks, War Factory, Construction Yard).
+These rebuild their exit/production buttons in a later frame
+(`SingleUnitModeHandler` update 0x7924E9: when the `+0x40` flag is set it
+calls `FUN_0082b110` + `FUN_00791e91`; the ctor also sets up the queue via
+`FUN_00792569`), and that Flash layout pass resets the name field after the
+push.
+
+**Fix 2 (implemented):** the `SingleUnitModeHandler` update vtable entry is
+redirected to `single_unit_update_with_name`. It runs the stock update, then
+re-sends `UnitName` every client frame via handler+0x14 → PanelImpl+0x14 →
+gadget (if initialized), just like the stock update already re-sends rank
+and ammo every frame. The signature is the first ~70 bytes of the update,
+identical in TW and KW. Static writes are now 35. If this still fails, Flash
+ignores unchanged assignments and the panel's ActionScript (TacticalHUD.apt)
+must be read.
+
+**Retest 2 (user):** still happens with the per-frame re-send.
+
+APT findings (`Core/1.0/Apt.big` → `dataptui	acticalhudselectiondetails.bin`,
+RefPack-compressed; decompressed copy in temp/apt/):
+- `unitNameText` has design-time text "Unit Name" and is bound to
+  `$_parent:UnitName&dropshadow`, i.e. it displays its parent clip's
+  `UnitName` variable.
+- C++ (`FUN_00773d27`) writes `"_level<N>.<gadgetPath>.UnitName"` into a
+  C++-side variable dictionary owned by `g_aptPlayer` (+0x68) whose entries
+  notify listeners. Re-sending every frame doesn't reach the visible field, so
+  in the failing case the field's `_parent` must be a different clip instance
+  than the one C++ addresses (e.g. a rebuilt panel/production layout).
+- Next: check whether this also happens at stock 30 FPS (`enabled=0`). If it
+  does, it's a vanilla bug. Otherwise trace the gadget path and dictionary
+  entry at runtime, or decode the panel's ActionScript.
+
+**Retest 3 (user):** does **not** happen at stock 30 FPS. A reliable repro at
+90 FPS: select production building A → deselect → select production building
+B → "Unit name" almost every time.
+
+**Fix 3 (implemented):** the panel's C++ steps (state/name/production setup,
+then the button rebuild on the next client frame; teardown on deselect) used
+to get exactly one APT frame each at 30 FPS. Now:
+- `TacticalSelectionDetailsPanelImpl::SetState` (slot 1, derived as slot 5's
+  entry − 16 and prologue-verified) is wrapped; a real state change requests
+  the engine's forced APT tick (`g_aptPlayer+0x1E9`, as in B1).
+- The single-unit update wrapper requests a forced tick when the handler's
+  `+0x40` "rebuild buttons" flag is set.
+The per-frame `UnitName` re-send (fix 2) is kept. Static writes are now 36.
 
 ---
 

@@ -11,6 +11,8 @@ typedef struct Config {
     BOOL logging;
     /* Diagnostic: client frames of one moving vehicle to log (0 = off). */
     u32 debug_motion_frames;
+    /* Diagnostic: client frames of frame-pacing data to log (0 = off). */
+    u32 debug_frame_times;
 } Config;
 
 void config_set_defaults(Config *config);

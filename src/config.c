@@ -6,6 +6,7 @@ void config_set_defaults(Config *config) {
     config->target_fps = 90;
     config->logging = TRUE;
     config->debug_motion_frames = 0;
+    config->debug_frame_times = 0;
 }
 
 BOOL config_load(Config *config, const wchar_t *path) {
@@ -26,5 +27,7 @@ BOOL config_load(Config *config, const wchar_t *path) {
     config->logging = GetPrivateProfileIntW(L"fps_patch", L"logging", config->logging, path) != 0;
     config->debug_motion_frames = GetPrivateProfileIntW(
         L"fps_patch", L"debug_motion_frames", config->debug_motion_frames, path);
+    config->debug_frame_times = GetPrivateProfileIntW(
+        L"fps_patch", L"debug_frame_times", config->debug_frame_times, path);
     return TRUE;
 }
