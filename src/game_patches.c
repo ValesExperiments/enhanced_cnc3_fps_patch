@@ -180,6 +180,88 @@ static u32 STDCALL get_phase_batch_limit(u32 phase, u32 ratio) {
 }
 
 /*
+ * Above 90 FPS (more than six client frames per logic tick) some client
+ * frames must run no logic phase at all. GameEngine::update advances the
+ * phase and dispatches once per client frame, wrapping to phase 1 (the new
+ * logic tick, which may stall on the network) after phase 6. Its dispatch
+ * call goes through the engine vtable to a wrapper which follows this
+ * schedule for a tick of F client frames:
+ *
+ *   frame 1        phase 1 only (tick start; "client frame boundary" tests
+ *                  phase == 1 above ratio 6, so it must not repeat)
+ *   frames 2..F-1  phases 2-5, spread evenly (zero or one per frame)
+ *   frame F        phase 6 (else GameEngine::update would wrap early)
+ *
+ * On a frame without a phase the wrapper undoes the engine's increment. F
+ * alternates by Bresenham so ticks average exactly targetFPS / 15 frames
+ * (160 FPS: 11, 11, 10), and interpolation advances every frame as j / F.
+ */
+typedef void(THISCALL *DispatchLogicPhaseFn)(void *engine, u32 phase);
+static DispatchLogicPhaseFn g_original_dispatch_logic_phase;
+static u32 g_tick_frames;      /* F for the current tick; 0 until the first tick */
+static u32 g_tick_frame;       /* j, 1..F */
+static u32 g_tick_accumulator; /* Bresenham remainder in fifteenths */
+
+static BOOL high_rate_schedule(void) {
+    return g_config->target_fps > LOGIC_FPS * LOGIC_PHASE_COUNT;
+}
+
+static u32 scheduled_phases_done(u32 frame, u32 frames) {
+    if (frame <= 1u) return 1u;
+    if (frame >= frames) return LOGIC_PHASE_COUNT;
+    /* Phases 2..5 over frames 2..F-1 (F > 6, so steps are 0 or 1). */
+    return 2u + (3u * (frame - 2u)) / (frames - 3u);
+}
+
+static void write_tick_interpolation(u8 *engine) {
+    *(float *)(engine + ENGINE_LOGIC_PHASE_INTERPOLATION) =
+        (float)g_tick_frame / (float)g_tick_frames;
+}
+
+static BOOL logic_tick_running(void) {
+    const u8 *game_client = *(const u8 *const *)game_address(
+        g_game, g_game->drawable_physics.game_client_pointer);
+    return game_client != NULL &&
+           game_client[g_game->particle_draw.client_simulates_offset] != 0;
+}
+
+static void THISCALL dispatch_logic_phase_scheduled(void *engine_pointer, u32 phase) {
+    u8 *engine = (u8 *)engine_pointer;
+    u32 next;
+
+    if (!high_rate_schedule()) {
+        g_original_dispatch_logic_phase(engine_pointer, phase);
+        return;
+    }
+    if (phase == 1u) {
+        g_original_dispatch_logic_phase(engine_pointer, phase);
+        /* A network stall clears the GameClient flag; the engine then reverts. */
+        if (logic_tick_running()) {
+            g_tick_accumulator += g_config->target_fps;
+            g_tick_frames = g_tick_accumulator / LOGIC_FPS;
+            g_tick_accumulator %= LOGIC_FPS;
+            g_tick_frame = 1u;
+        }
+        if (g_tick_frames != 0u) write_tick_interpolation(engine);
+        return;
+    }
+    if (g_tick_frames == 0u) {
+        /* Before the first scheduled tick: one phase per frame, as at 90 FPS. */
+        g_original_dispatch_logic_phase(engine_pointer, phase);
+        return;
+    }
+    next = g_tick_frame < g_tick_frames ? g_tick_frame + 1u : g_tick_frames;
+    if (scheduled_phases_done(next, g_tick_frames) >= phase) {
+        g_original_dispatch_logic_phase(engine_pointer, phase);
+    } else {
+        /* Render-only frame: undo GameEngine::update's phase increment. */
+        *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) = phase - 1u;
+    }
+    g_tick_frame = next;
+    write_tick_interpolation(engine);
+}
+
+/*
  * KW 1.02 GameEngine_UpdatePhaseInterpolation, Steam VA 0x0064333E.
  * Interpolation must advance once per client slice, not once per raw phase;
  * otherwise the 2-3 and 5-6 batches at 60 FPS expose the wrong visual sample.
@@ -191,7 +273,11 @@ static void THISCALL update_phase_interpolation(void *engine_pointer) {
     u32 client_slot = (ratio * phase + LOGIC_PHASE_COUNT - 1u) / LOGIC_PHASE_COUNT;
     float interpolation;
 
-    if (ratio == 3u || ratio == 6u) {
+    if (high_rate_schedule() && g_tick_frames != 0u) {
+        write_tick_interpolation(engine);
+        return;
+    }
+    if (ratio == 3u || ratio >= 6u) {
         /* Preserve bit-for-formula stock behavior for the already-valid ratios. */
         interpolation = (float)phase / (float)LOGIC_PHASE_COUNT;
     } else {
@@ -203,14 +289,54 @@ static void THISCALL update_phase_interpolation(void *engine_pointer) {
 }
 
 /*
+ * GameEngine::update keeps ECX (this) live across its calls of the stock
+ * interpolation leaf and then dispatches through [ECX], because that leaf
+ * only touches XMM0/XMM1 and the flags. The C replacement may use other
+ * registers, so the patched entry goes through this stub, which preserves
+ * EAX/ECX/EDX and XMM2-XMM7 around it.
+ */
+__attribute__((naked)) static void update_phase_interpolation_entry(void) {
+    __asm__ volatile(
+        "pushl %%eax\n\t"
+        "pushl %%ecx\n\t"
+        "pushl %%edx\n\t"
+        "subl $96, %%esp\n\t"
+        "movdqu %%xmm2, 0(%%esp)\n\t"
+        "movdqu %%xmm3, 16(%%esp)\n\t"
+        "movdqu %%xmm4, 32(%%esp)\n\t"
+        "movdqu %%xmm5, 48(%%esp)\n\t"
+        "movdqu %%xmm6, 64(%%esp)\n\t"
+        "movdqu %%xmm7, 80(%%esp)\n\t"
+        "calll %c0\n\t"
+        "movdqu 0(%%esp), %%xmm2\n\t"
+        "movdqu 16(%%esp), %%xmm3\n\t"
+        "movdqu 32(%%esp), %%xmm4\n\t"
+        "movdqu 48(%%esp), %%xmm5\n\t"
+        "movdqu 64(%%esp), %%xmm6\n\t"
+        "movdqu 80(%%esp), %%xmm7\n\t"
+        "addl $96, %%esp\n\t"
+        "popl %%edx\n\t"
+        "popl %%ecx\n\t"
+        "popl %%eax\n\t"
+        "retl"
+        :
+        : "i"(update_phase_interpolation));
+}
+
+/*
  * KW 1.02 GameLogic_UpdatePhase, Steam VA 0x005EF10F, drains pending
  * Object-to-Drawable updates once after the final phase in each client slice.
  */
 static BOOL STDCALL is_client_slice_end(u32 phase) {
     u32 ratio = g_config->target_fps / LOGIC_FPS;
-    u32 client_slot = (ratio * phase + LOGIC_PHASE_COUNT - 1u) / LOGIC_PHASE_COUNT;
+    u32 client_slot;
+    u32 end_phase;
+
+    /* From six client frames per tick on, every phase is its own slice. */
+    if (ratio >= LOGIC_PHASE_COUNT) return TRUE;
+    client_slot = (ratio * phase + LOGIC_PHASE_COUNT - 1u) / LOGIC_PHASE_COUNT;
     /* floor(6 * slot / ratio) is the final phase assigned to that slice. */
-    u32 end_phase = (LOGIC_PHASE_COUNT * client_slot) / ratio;
+    end_phase = (LOGIC_PHASE_COUNT * client_slot) / ratio;
     return phase == end_phase;
 }
 
@@ -1488,6 +1614,7 @@ static u32 STDCALL get_retail_limiter_interval(void *engine_pointer) {
     const PacingLayout *pacing;
     i32 signed_multiplier;
     u32 multiplier;
+    u32 divisor;
     u32 retail_frame_ms;
     u32 logic_cycle_budget_ms;
     u32 scaled;
@@ -1516,22 +1643,30 @@ static u32 STDCALL get_retail_limiter_interval(void *engine_pointer) {
     logic_cycle_budget_ms =
         retail_frame_ms * RETAIL_CLIENT_FRAMES_PER_LOGIC_TICK;
 
-    if (g_limiter_interval_divisor != multiplier) {
+    /*
+     * Divide in fifteenths of a client frame so fractional rates (e.g. 160 FPS
+     * = 10 2/3 frames per logic tick) get their exact average interval. The
+     * multiplier is the truncated ratio we set; adaptive pacing (multiplayer)
+     * may lower it, and then it is used as is. Integer ratios are unchanged.
+     */
+    divisor = multiplier == g_config->target_fps / LOGIC_FPS ? g_config->target_fps
+                                                             : multiplier * LOGIC_FPS;
+    if (g_limiter_interval_divisor != divisor) {
         if (g_limiter_interval_divisor == 0u) {
             g_limiter_interval_remainder = 0u;
         } else {
             /* Retain the same fractional phase when adaptive pacing changes. */
             g_limiter_interval_remainder =
-                (g_limiter_interval_remainder * multiplier +
+                (g_limiter_interval_remainder * divisor +
                  g_limiter_interval_divisor / 2u) /
                 g_limiter_interval_divisor;
         }
-        g_limiter_interval_divisor = multiplier;
+        g_limiter_interval_divisor = divisor;
     }
 
-    scaled = g_limiter_interval_remainder + logic_cycle_budget_ms;
-    interval = scaled / multiplier;
-    g_limiter_interval_remainder = scaled % multiplier;
+    scaled = g_limiter_interval_remainder + logic_cycle_budget_ms * LOGIC_FPS;
+    interval = scaled / divisor;
+    g_limiter_interval_remainder = scaled % divisor;
     if (interval == 0u) interval = 1u;
     log_frame_time_sample((u8 *)engine_pointer, interval, multiplier);
     return interval;
@@ -2203,7 +2338,8 @@ static void install_drawable_interpolation_window(PatchInstaller *installer) {
         "interpolation history window", "interpolation spline window"
     };
     const u8 stock_window = 6u;
-    u8 window = (u8)(3u * (g_config->target_fps / LOGIC_FPS));
+    /* Three logic ticks of the longest tick (fractional rates alternate). */
+    u8 window = (u8)(3u * ((g_config->target_fps + LOGIC_FPS - 1u) / LOGIC_FPS));
     u32 i;
 
     for (i = 0; i < 2; ++i) {
@@ -2308,11 +2444,11 @@ static void install_phase_scheduler(PatchInstaller *installer) {
 
     /*
      * Tail-jump from the standalone leaf entry. ECX remains GameEngine*, and
-     * the helper's RET returns directly to the leaf's original caller.
+     * the stub's RET returns directly to the leaf's original caller.
      */
     encode_rel32(&interpolation_patch[1],
                  game_address(g_game, interpolation_rva + 5u),
-                 update_phase_interpolation);
+                 update_phase_interpolation_entry);
 
     memcpy(flush_expected, flush_template, sizeof(flush_expected));
     encode_u32(&flush_expected[1],
@@ -2352,6 +2488,17 @@ static void install_phase_scheduler(PatchInstaller *installer) {
                 sizeof(interpolation_patch));
     patch_bytes(installer, "client-slice Drawable flush block", flush_rva,
                 flush_expected, flush_patch, sizeof(flush_patch));
+
+    g_original_dispatch_logic_phase = (DispatchLogicPhaseFn)game_address(
+        g_game, scheduler->dispatch_function);
+    patch_pointer(installer, "GameEngine dispatch vtable entry",
+                  scheduler->dispatch_vtable_entries[0],
+                  (const void *)g_original_dispatch_logic_phase,
+                  (const void *)dispatch_logic_phase_scheduled);
+    patch_pointer(installer, "Win32GameEngine dispatch vtable entry",
+                  scheduler->dispatch_vtable_entries[1],
+                  (const void *)g_original_dispatch_logic_phase,
+                  (const void *)dispatch_logic_phase_scheduled);
 }
 
 static void install_w3d_clock(PatchInstaller *installer) {
@@ -2543,6 +2690,9 @@ void game_patches_reset_state(void) {
         /* Seed so particle simulation runs on the first client frame of a session. */
         g_particle_update_accumulator = g_config->target_fps - g_retail_visual_fps;
         g_particle_blend_fraction = 0.0f;
+        g_tick_frames = 0u;
+        g_tick_frame = 0u;
+        g_tick_accumulator = 0u;
         /* Seed so audio service runs before the first logic-phase slice. */
         g_audio_update_accumulator = g_config->target_fps - g_retail_visual_fps;
         g_w3d_time_remainder = 0;

@@ -23,7 +23,11 @@ BOOL config_load(Config *config, const wchar_t *path) {
     config->enabled = GetPrivateProfileIntW(L"fps_patch", L"enabled", config->enabled, path) != 0;
     fps = (int)GetPrivateProfileIntW(L"fps_patch", L"target_fps", config->target_fps, path);
     /* Ratios 3..6 are the complete-client schedules available above 30 FPS. */
-    config->valid = fps >= 45 && fps <= 90 && fps % 15 == 0;
+    /*
+     * Up to 90 FPS the schedules need a whole number of client frames per
+     * 15 Hz logic tick; above 90 the tick length alternates (any rate).
+     */
+    config->valid = (fps >= 45 && fps <= 90 && fps % 15 == 0) || (fps > 90 && fps <= 240);
     config->target_fps = config->valid ? (u32)fps : 0u;
     config->logging = GetPrivateProfileIntW(L"fps_patch", L"logging", config->logging, path) != 0;
     config->debug_motion_frames = GetPrivateProfileIntW(

@@ -149,6 +149,21 @@ Fix or remove anything that turns out to be wrong.
   visibly at any FPS. Check texture formats (`FUN_0075609A(w, h, D3DFMT, …)`
   in TW) before chasing timing.
 - Unit names: Buzzers are **Scrin**, not Nod.
+- **Replacing a leaf function via a JMP at its entry is not ABI-safe.**
+  MSVC callers may keep "volatile" registers (ECX, EDX, EAX, XMM) live across
+  calls to leaves that don't touch them (e.g. GameEngine_update relies on
+  UpdatePhaseInterpolation keeping ECX). Route such hooks through a naked
+  stub that saves what the original leaf preserved.
+- **Diagnosing a DLL crash:** Windows Application log (event 1000) gives the
+  fault offset in DINPUT8.dll; disassemble the shipped DLL at that RVA with
+  capstone + pefile (installed in the project venv).
+- **Logic scheduling (F1):** `GameEngine_update` (TW 0x54B0CE) does
+  `phase++` then dispatches via vtable slot 0x94 (`DispatchLogicPhase`, live
+  vtable is `Win32GameEngine`). Wrap to phase 1 = new logic tick (may stall:
+  `GameClient+0xD4` cleared, phase reverts). Above ratio 6,
+  `IsClientFrameBoundary` is `phase == 1`, so phase 1 must occupy exactly one
+  frame and phase 6 must land on the tick's last frame. Simulate scheduler
+  changes offline (Python) before shipping.
 - **Per-call stepping systems** (TintEnvelope colour flashes, etc.) are
   called once per client frame from `Drawable_updateDrawable` (TW
   0x48353F). Check its callees for other "one step per frame" systems.

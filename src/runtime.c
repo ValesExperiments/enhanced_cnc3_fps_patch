@@ -62,7 +62,7 @@ static BOOL CALLBACK initialize_runtime_files_once(
     log_u32("bootstrap_status=", (u32)runtime->bootstrap_status);
 
     if (!runtime->config.valid) {
-        log_line("ERROR: target_fps must be 45, 60, 75, or 90");
+        log_line("ERROR: target_fps must be 45, 60, 75, 90, or 91-240");
         runtime->disabled = TRUE;
     } else if (!runtime->config.enabled) {
         log_line("Patch disabled by configuration");

@@ -56,6 +56,13 @@ typedef struct SchedulerLayout {
     u32 phase_interpolation_function;
     /* Original sub_6DE5B1 call at byte 34 of the 39-byte phase-end block. */
     BranchSite client_slice_flush;
+    /*
+     * GameEngine::DispatchLogicPhase(phase) (contains the batch block) and
+     * its two vtable entries (GameEngine and Win32GameEngine, slot 0x94),
+     * through which GameEngine::update dispatches once per client frame.
+     */
+    u32 dispatch_function;
+    u32 dispatch_vtable_entries[2];
 } SchedulerLayout;
 
 typedef struct W3DClockLayout {

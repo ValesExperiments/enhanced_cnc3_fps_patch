@@ -772,6 +772,60 @@ rocket pods** have an abnormally fast idle animation.
 
 ## F1. Beyond 90 FPS (120 / 144 / 160+)
 
+**Status (2026-10-11):** implemented for any rate from 91 to 240 FPS
+(option (b) below, fractional scheduling); first target 160 FPS, needs an
+in-game test. B3 round 7 (resampled trails, pause freeze) was confirmed
+before this started.
+
+### How it works (TW 1.10 VAs; KW identical apart from the prologue)
+- `GameEngine_update` (0x54B0CE) runs once per client frame: `phase++`;
+  if `phase < 7` it calls `this->DispatchLogicPhase(phase)` (vtable slot
+  0x94), else it wraps to phase 1 and dispatches that (the new logic tick:
+  network/lockstep checks; a stall clears `GameClient+0xD4` and the phase
+  reverts). So stock always runs at least one phase per frame: max 6 frames
+  per tick = 90 FPS.
+- `DispatchLogicPhase` (TW 0x55D866, KW 1.03 0x5C3B55) is reached through
+  the `GameEngine` and `Win32GameEngine` vtables. Both entries now point to
+  `dispatch_logic_phase_scheduled`. Above 90 FPS each tick gets
+  F = 10/11 frames by Bresenham (`acc += target; F = acc / 15`). The schedule
+  is: frame 1 → phase 1 only (above ratio 6, `IsClientFrameBoundary` is
+  `phase == 1`, so phase 1 must not repeat); frames 2..F−1 → phases 2..5
+  spread evenly (`2 + 3(j−2)/(F−3)`); frame F → phase 6 (otherwise the
+  engine would wrap a frame early). On a frame without a phase, the wrapper
+  undoes the engine's `phase++`.
+- Interpolation (`GameEngine+0x48`) = j / F, written by the wrapper and
+  by the interpolation hook, so units move every frame.
+- `is_client_slice_end` returns TRUE for ratio ≥ 6 (every phase is its own
+  slice); the stock batch block is skipped by the engine itself at ratio ≥ 6.
+- Limiter: the interval is computed in fifteenths of a frame,
+  `(budget × 15 + rem) / target`, so 160 FPS averages 990/160 =
+  6.1875 ms (integer ratios are unchanged). If multiplayer adaptive pacing
+  lowers the multiplier, `multiplier × 15` is used instead.
+- B4 interpolation window = 3 × ceil(target / 15) (33 at 160).
+- Config accepts 45/60/75/90 or any value from 91 to 240.
+- Offline simulation of the update loop + wrapper: 160 FPS → 45 ticks per 480
+  frames (exactly 15 Hz), phases in order, phase 1 on exactly one frame per
+  tick, interpolation evenly spaced; 120 and 144 also exactly 15 Hz.
+
+### Crash on first 160 FPS run (fixed 2026-10-11)
+Access violation in the DLL (Windows Application log, event 1000, fault
+offset 0xAB4D), found by disassembling the shipped DLL with capstone. In its
+wrap path `GameEngine_update` does `MOV ECX,ESI; CALL UpdatePhaseInterpolation;
+MOV EAX,[ESI]; PUSH EBX; CALL [EAX+0x94]`. It relies on the stock leaf
+keeping ECX (the leaf only touches XMM0/XMM1). The original author's C
+replacement (reached by a JMP at the leaf's entry) clobbered ECX. At 90 FPS
+the original dispatch never used `this`, so it went unnoticed; our dispatch
+wrapper writes through it → crash. The leaf entry now jumps to a naked stub
+that saves EAX/ECX/EDX and XMM2–XMM7 around the C function.
+
+### Known limits
+- Logic is still tied to frames: if the PC can't sustain the rate, the game
+  runs slower (as retail does below 30 FPS).
+- Pacing is still `timeGetTime` + `Sleep(0)` (1 ms steps: 6/7 ms frames
+  at 160). If that judders, a QPC limiter is the next step.
+- Multiplayer: `IsClientFrameBoundary` (`phase == 1`) drives the network
+  adaptation; the schedule keeps phase 1 to one frame, but MP is untested.
+
 ### Blockers found in the current code
 1. **Config validation** ([config.c](../src/config.c)): only 45–90 in steps of
    15 are accepted.

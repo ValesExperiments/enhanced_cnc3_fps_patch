@@ -3,7 +3,10 @@
 ; Master switch. The dinput8 proxy still forwards normally when disabled.
 enabled=1
 
-; Supported values: 45, 60, 75, or 90. Default: 90.
+; Supported values: 45, 60, 75, 90, or any whole number from 91 to 240
+; (experimental, e.g. 120, 144, 160). Default: 90. The game logic always
+; runs at 15 Hz; if your PC can't hold the chosen rate, the game slows down
+; (as the retail game does below 30 FPS), so pick a rate it can sustain.
 target_fps=90
 
 ; Write fps_patch.log next to the DLL.

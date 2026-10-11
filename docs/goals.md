@@ -24,11 +24,11 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | B4 | All moving vehicles and aircraft should move smoothly (a small stutter is visible at 90 FPS) | **Done** (confirmed 2026-10-11) |
 | B5 | No random small hitches; camera scrolling as smooth as unit movement | **Solved** with our DXVK build (G-Sync works borderless; confirmed 2026-10-11) |
 | B6 | Selected unit/building panel must never show the placeholder name "Unit name" | **Done** (fix 3, confirmed 2026-10-11) |
-| B3 | Particles should move smoothly at the render rate rather than in 30 Hz steps (e.g. by interpolation) | CPU particles, bullets, trails, Shockwave, Ion Cannon ball and swarms (Scrin Buzzers) confirmed. Repair-drone sparks confirmed; vehicle repair sparks (round 3: smooth spark deaths) **need in-game test**. Smoke pop is vanilla behaviour (ignored) |
+| B3 | Particles should move smoothly at the render rate rather than in 30 Hz steps (e.g. by interpolation) | CPU particles, bullets, trails, Shockwave, Ion Cannon ball and swarms (Scrin Buzzers) confirmed. **Done**: all particle types confirmed smooth 2026-10-11, including repair sparks and pausing. Smoke pop is vanilla behaviour (ignored) |
 | B7 | Fog of war / shroud should clear smoothly when units reveal it | **Done** (confirmed 2026-10-11). The shadow blink when the shroud covers an object again is vanilla behaviour (ignored) |
 | B8 | Secondary-object animations should not be sped up (e.g. Pitbull rocket pods' idle motion) | **Closed**: the same in vanilla (user, 2026-10-11) |
 | B9 | The white "selected" flash should last as long as at 30 FPS | **Done** (confirmed 2026-10-11) |
-| F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | Not started |
+| F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | Implemented for 91–240 FPS (any value), **160 needs in-game test** |
 
 ## Groundwork needed first
 
@@ -74,14 +74,17 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
   30 Hz frames, so it lasts 200 ms again but fades smoothly. Repeated
   flashes (a counted "flash N times") used a 15-frame interval; it's now
   FPS/2 frames, i.e. 500 ms again.
-- **B3 sparks:** Repair-drone sparks are very short trails (3 points). The
+- **B3 sparks (done):** Repair-drone sparks are very short trails (3 points). The
   front grew smoothly, but the oldest point was dropped in 30 Hz steps, so the
   whole spark jumped. The tail now slides smoothly too. The vehicle repair
   sparks (`HealingSparks`) barely move and fade white→black within 2–10
   steps. A log showed the motion was blended, but every spark *death*
   jumped one step (constant with these short-lived sparks). Deaths are now
   continuous too.
-- **F1:** The main blocker is the 6-phase logic scheduler, which caps the
-  client-to-logic ratio at 6 (90 FPS). FPS values that aren't multiples of 15,
-  such as 144 and 160, also need fractional scheduling and more precise frame
-  pacing.
+- **F1:** Above 90 FPS some frames must run no logic at all. A new
+  scheduler gives each 15 Hz logic tick 10 or 11 frames (160 FPS: 11, 11,
+  10), runs its six logic phases spread across them (phase 1 on the first
+  frame, phase 6 on the last), and skips logic on the frames in between.
+  Unit interpolation advances every frame and the frame limiter targets the
+  exact rate. If the PC can't hold the rate, the game slows down (like retail
+  below 30 FPS).

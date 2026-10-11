@@ -1615,6 +1615,46 @@ static BOOL resolve_objective_ui_sites(
     return TRUE;
 }
 
+/*
+ * DispatchLogicPhase: push registers; EDI = phase; CMP EDI,1; MOV EBP,ECX; JNZ.
+ * Tiberium Wars saves EBP/ESI/EDI; Kane's Wrath also EBX (and sets BL = 1).
+ */
+static const u16 g_dispatch_logic_phase_tw_pattern[] = {
+    0x55, 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x10, 0x83, 0xFF, 0x01, 0x8B, 0xE9, 0x0F, 0x85
+};
+static const u16 g_dispatch_logic_phase_kw_pattern[] = {
+    0x53, 0x55, 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x14, 0x83, 0xFF, 0x01, 0x8B, 0xE9,
+    0xB3, 0x01, 0x0F, 0x85
+};
+
+/* Every read-only dword equal to `value`; FALSE if there are more than `max`. */
+static BOOL find_readonly_pointers(u8 *module, IMAGE_NT_HEADERS32 *nt, u32 value,
+                                   u32 *out_rvas, u32 max, u32 *out_count) {
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u32 count = 0;
+    u16 section_index;
+
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections;
+         ++section_index, ++section) {
+        u32 start = section->VirtualAddress;
+        u32 size = section->Misc.VirtualSize;
+        u32 offset;
+        if ((section->Characteristics & IMAGE_SCN_MEM_READ) == 0 ||
+            (section->Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE)) != 0 ||
+            start >= nt->OptionalHeader.SizeOfImage ||
+            size > nt->OptionalHeader.SizeOfImage - start || size < sizeof(u32)) {
+            continue;
+        }
+        for (offset = 0; offset <= size - sizeof(u32); offset += sizeof(u32)) {
+            if (load_u32(module + start + offset) != value) continue;
+            if (count >= max) return FALSE;
+            out_rvas[count++] = start + offset;
+        }
+    }
+    *out_count = count;
+    return TRUE;
+}
+
 static BOOL resolve_scheduler_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     SchedulerLayout *scheduler = &game->scheduler;
@@ -1639,10 +1679,25 @@ static BOOL resolve_scheduler_sites(
      * from being accepted as the phase-end flush.
      */
     scheduler->client_slice_flush.instruction = match + 34u;
-    return decode_relative_target(
-        module, game->pe_size_of_image,
-        scheduler->client_slice_flush.instruction, 0xE8,
-        &scheduler->client_slice_flush.target);
+    if (!decode_relative_target(module, game->pe_size_of_image,
+                                scheduler->client_slice_flush.instruction, 0xE8,
+                                &scheduler->client_slice_flush.target)) {
+        return FALSE;
+    }
+
+    /* The batch block lies inside DispatchLogicPhase, a short way past its entry. */
+    if ((!FIND_UNIQUE(module, nt, g_dispatch_logic_phase_tw_pattern,
+                      &scheduler->dispatch_function) &&
+         !FIND_UNIQUE(module, nt, g_dispatch_logic_phase_kw_pattern,
+                      &scheduler->dispatch_function)) ||
+        scheduler->phase_batch_block <= scheduler->dispatch_function ||
+        scheduler->phase_batch_block - scheduler->dispatch_function > 0x200u ||
+        !find_readonly_pointers(module, nt,
+                                (u32)(uintptr_t)(module + scheduler->dispatch_function),
+                                scheduler->dispatch_vtable_entries, 2u, &match)) {
+        return FALSE;
+    }
+    return match == 2u;
 }
 
 static BOOL resolve_w3d_clock_sites(
