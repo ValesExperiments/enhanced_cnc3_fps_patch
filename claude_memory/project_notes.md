@@ -154,6 +154,10 @@ Fix or remove anything that turns out to be wrong.
   calls to leaves that don't touch them (e.g. GameEngine_update relies on
   UpdatePhaseInterpolation keeping ECX). Route such hooks through a naked
   stub that saves what the original leaf preserved.
+- **Don't predict the mouse from UI events.** CnC3's APT UI samples the
+  cursor some time before its events reach C++ code, so extrapolating from
+  live `GetCursorPos` stair-steps. For UI-driven 30 Hz camera moves, ease
+  each step (short exponential follow, ~18 ms) instead (B10).
 - **Diagnosing a DLL crash:** Windows Application log (event 1000) gives the
   fault offset in DINPUT8.dll; disassemble the shipped DLL at that RVA with
   capstone + pefile (installed in the project venv).

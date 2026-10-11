@@ -28,7 +28,8 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | B7 | Fog of war / shroud should clear smoothly when units reveal it | **Done** (confirmed 2026-10-11). The shadow blink when the shroud covers an object again is vanilla behaviour (ignored) |
 | B8 | Secondary-object animations should not be sped up (e.g. Pitbull rocket pods' idle motion) | **Closed**: the same in vanilla (user, 2026-10-11) |
 | B9 | The white "selected" flash should last as long as at 30 FPS | **Done** (confirmed 2026-10-11) |
-| F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | Implemented for 91–240 FPS (any value), **160 needs in-game test** |
+| F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | **Works** for any 91–240 FPS; user runs 157 FPS with no stutter (2026-10-11) |
+| B10 | Dragging on the minimap should pan the camera smoothly | Cursor prediction dropped (stair-stepped); round 4 = game's steps lightly eased (18 ms), **needs in-game test** |
 
 ## Groundwork needed first
 
@@ -81,6 +82,10 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
   steps. A log showed the motion was blended, but every spark *death*
   jumped one step (constant with these short-lived sparks). Deaths are now
   continuous too.
+- **B10:** Minimap drag moves only arrive with the ~30 Hz UI (and only when
+  the point changes), and each one snapped the camera. The click still
+  jumps instantly; during a drag the camera goes where the game sends it,
+  but each step is eased over about 18 ms instead of snapping.
 - **F1:** Above 90 FPS some frames must run no logic at all. A new
   scheduler gives each 15 Hz logic tick 10 or 11 frames (160 FPS: 11, 11,
   10), runs its six logic phases spread across them (phase 1 on the first

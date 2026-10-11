@@ -144,6 +144,7 @@ static int check(const char *path) {
         { "camera_ease", resolve_camera_ease_sites },
         { "shroud", resolve_shroud_sites },
         { "tint_envelope", resolve_tint_envelope_sites },
+        { "minimap", resolve_minimap_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -209,6 +210,8 @@ static int check(const char *path) {
                full.tint_envelope.update_calls[0].instruction,
                full.tint_envelope.update_calls[1].instruction,
                full.tint_envelope.flash_interval);
+        printf("  minimap look-at copies %u, view 0x%X\n",
+               full.minimap.count, full.minimap.view_pointer);
         printf("  shroud fog row copy call 0x%X -> 0x%X\n",
                full.shroud.fog_row_copy_call.instruction,
                full.shroud.fog_row_copy_call.target);

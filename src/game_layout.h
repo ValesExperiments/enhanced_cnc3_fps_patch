@@ -236,6 +236,26 @@ typedef struct TintEnvelopeLayout {
     u32 flash_interval;
 } TintEnvelopeLayout;
 
+enum {
+    MINIMAP_LOOK_AT_MAX = 2,
+    MINIMAP_LOOK_AT_CALLS = 2,
+    MINIMAP_CLICK_CALL = 0, /* in the drag operation's constructor */
+    MINIMAP_MOVE_CALL = 1   /* in its mouse-move handler */
+};
+
+typedef struct MinimapLayout {
+    /*
+     * Radar "look at" (TW 1.10 VA 0x7A6325; Kane's Wrath has two radar
+     * implementations): convert a radar point to a world point, then
+     * view->lookAt(world) (virtual +0x48). Called on the click that starts a
+     * minimap drag and on every drag move; moves arrive with the 30 Hz UI.
+     */
+    u32 count;
+    u32 converters[MINIMAP_LOOK_AT_MAX];
+    BranchSite calls[MINIMAP_LOOK_AT_MAX][MINIMAP_LOOK_AT_CALLS];
+    u32 view_pointer;
+} MinimapLayout;
+
 typedef struct SelectionPanelLayout {
     /*
      * TacticalSelectionDetailsPanelImpl::SetUnitName (forwards only changed
@@ -303,6 +323,7 @@ typedef struct GameLayout {
     CameraEaseLayout camera_ease;
     ShroudLayout shroud;
     TintEnvelopeLayout tint_envelope;
+    MinimapLayout minimap;
 } GameLayout;
 
 typedef enum GameResolveResult {
@@ -417,6 +438,10 @@ enum {
     TINT_ENVELOPE_ATTACK = 1,
     TINT_ENVELOPE_DECAY = 2,
     TINT_ENVELOPE_SUSTAIN = 3,
+
+    /* Radar drag operation -> its input handler; view lookAt virtual slot. */
+    MINIMAP_DRAG_HANDLER = 0x04,
+    VIEW_LOOK_AT_SLOT = 0x48 / 4,
 
     /* SingleUnitModeHandler -> SelectionDetails::PanelImpl -> panel gadget. */
     SELECTION_HANDLER_PANEL = 0x14,

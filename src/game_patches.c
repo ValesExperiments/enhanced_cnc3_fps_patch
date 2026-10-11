@@ -563,6 +563,99 @@ static u8 THISCALL calc_physics_xform_interpolated(void *drawable, float *info) 
     return 1;
 }
 
+/*
+ * Clicking the minimap moves the camera there; dragging pans it. Each drag
+ * move calls the radar's look-at, which snaps the view, but moves only arrive
+ * with the UI's ~30 Hz update, so panning stepped. The click still snaps at
+ * once. Each drag move only sets the target the game would have looked at;
+ * every rendered frame the shown point closes 1 - exp(-dt / 18 ms) of the
+ * remaining distance, so every step is lightly eased without feeling floaty.
+ */
+typedef void(THISCALL *MinimapConvertFn)(void *handler, float *world, const void *radar);
+typedef void(THISCALL *ViewLookAtFn)(void *view, const float *world);
+
+static const float MINIMAP_SMOOTH_SECONDS = 0.018f;
+static const float MINIMAP_SETTLE_DISTANCE = 0.5f;
+
+static MinimapConvertFn g_minimap_convert[MINIMAP_LOOK_AT_MAX];
+static float g_minimap_target[3];
+static float g_minimap_shown[3];
+static BOOL g_minimap_has_shown;
+static BOOL g_minimap_following;
+static LARGE_INTEGER g_minimap_last_tick;
+static LARGE_INTEGER g_minimap_frequency;
+
+static void minimap_view_look_at(const float *world) {
+    void *view = *(void **)game_address(g_game, g_game->minimap.view_pointer);
+    if (view == NULL) return;
+    ((ViewLookAtFn)(*(void ***)view)[VIEW_LOOK_AT_SLOT])(view, world);
+}
+
+static void minimap_look_at(u32 copy, BOOL click, void *drag_operation,
+                            const void *radar_point) {
+    void *handler = *(void **)((u8 *)drag_operation + MINIMAP_DRAG_HANDLER);
+    float world[3];
+
+    g_minimap_convert[copy](handler, world, radar_point);
+    if (click || !g_minimap_has_shown || g_config->target_fps <= g_retail_visual_fps) {
+        /* The click goes there at once, like retail. */
+        memcpy(g_minimap_shown, world, sizeof(g_minimap_shown));
+        g_minimap_has_shown = TRUE;
+        g_minimap_following = FALSE;
+        minimap_view_look_at(world);
+        return;
+    }
+    memcpy(g_minimap_target, world, sizeof(g_minimap_target));
+    if (!g_minimap_following) {
+        if (g_minimap_frequency.QuadPart == 0) QueryPerformanceFrequency(&g_minimap_frequency);
+        QueryPerformanceCounter(&g_minimap_last_tick);
+        g_minimap_following = TRUE;
+    }
+}
+
+static void THISCALL minimap_click_first(void *drag_operation, const void *radar_point) {
+    minimap_look_at(0, TRUE, drag_operation, radar_point);
+}
+
+static void THISCALL minimap_move_first(void *drag_operation, const void *radar_point) {
+    minimap_look_at(0, FALSE, drag_operation, radar_point);
+}
+
+static void THISCALL minimap_click_second(void *drag_operation, const void *radar_point) {
+    minimap_look_at(1, TRUE, drag_operation, radar_point);
+}
+
+static void THISCALL minimap_move_second(void *drag_operation, const void *radar_point) {
+    minimap_look_at(1, FALSE, drag_operation, radar_point);
+}
+
+/* Once per rendered frame (also while paused). */
+static void advance_minimap_glide(void) {
+    LARGE_INTEGER now;
+    float dt;
+    float keep;
+    float distance_sq = 0.0f;
+    u32 k;
+
+    if (!g_minimap_following) return;
+    QueryPerformanceCounter(&now);
+    dt = (float)((double)(now.QuadPart - g_minimap_last_tick.QuadPart) /
+                 (double)g_minimap_frequency.QuadPart);
+    g_minimap_last_tick = now;
+    if (dt > 0.25f) dt = 0.25f;
+    keep = expf(-dt / MINIMAP_SMOOTH_SECONDS);
+    for (k = 0; k < 3; ++k) {
+        float remaining = (g_minimap_target[k] - g_minimap_shown[k]) * keep;
+        g_minimap_shown[k] = g_minimap_target[k] - remaining;
+        distance_sq += remaining * remaining;
+    }
+    if (distance_sq < MINIMAP_SETTLE_DISTANCE * MINIMAP_SETTLE_DISTANCE) {
+        memcpy(g_minimap_shown, g_minimap_target, sizeof(g_minimap_shown));
+        g_minimap_following = FALSE;
+    }
+    minimap_view_look_at(g_minimap_shown);
+}
+
 static BOOL particles_simulate(void) {
     const ParticleDrawLayout *draw = &g_game->particle_draw;
     const u8 *game_client = *(const u8 *const *)game_address(
@@ -579,6 +672,7 @@ static void THISCALL update_particles_at_retail_rate(void *manager) {
     u32 target_fps = g_config->target_fps;
 
     if (manager == NULL) return;
+    advance_minimap_glide();
     update = (SubsystemUpdateFn)game_address(
         g_game, g_game->visual.particle_simulation.target);
     if (target_fps <= g_retail_visual_fps) {
@@ -2236,6 +2330,33 @@ static void install_tracer_motion(PatchInstaller *installer) {
                  &tracers->tracer_update_call, 0xE8, call_patch, sizeof(call_patch));
 }
 
+static void install_minimap_glide(PatchInstaller *installer) {
+    static const char *const names[MINIMAP_LOOK_AT_MAX][MINIMAP_LOOK_AT_CALLS] = {
+        { "minimap look-at call 1", "minimap look-at call 2" },
+        { "minimap look-at call 3", "minimap look-at call 4" }
+    };
+    static void *const wrappers[MINIMAP_LOOK_AT_MAX][MINIMAP_LOOK_AT_CALLS] = {
+        { (void *)minimap_click_first, (void *)minimap_move_first },
+        { (void *)minimap_click_second, (void *)minimap_move_second }
+    };
+    const MinimapLayout *minimap = &g_game->minimap;
+    u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
+    u32 copy;
+    u32 i;
+
+    for (copy = 0; copy < minimap->count; ++copy) {
+        g_minimap_convert[copy] =
+            (MinimapConvertFn)game_address(g_game, minimap->converters[copy]);
+        for (i = 0; i < MINIMAP_LOOK_AT_CALLS; ++i) {
+            const BranchSite *call = &minimap->calls[copy][i];
+            encode_rel32(&call_patch[1], game_address(g_game, call->instruction + 5u),
+                         wrappers[copy][i]);
+            patch_branch(installer, names[copy][i], call, 0xE8, call_patch,
+                         sizeof(call_patch));
+        }
+    }
+}
+
 static void install_tint_envelope_timing(PatchInstaller *installer) {
     static const char *const names[TINT_ENVELOPE_UPDATE_CALLS] = {
         "tint envelope update branch 1", "tint envelope update branch 2"
@@ -2629,6 +2750,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_camera_ease_timing(&installer);
     install_shroud_timing(&installer);
     install_tint_envelope_timing(&installer);
+    install_minimap_glide(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);
@@ -2693,6 +2815,8 @@ void game_patches_reset_state(void) {
         g_tick_frames = 0u;
         g_tick_frame = 0u;
         g_tick_accumulator = 0u;
+        g_minimap_following = FALSE;
+        g_minimap_has_shown = FALSE;
         /* Seed so audio service runs before the first logic-phase slice. */
         g_audio_update_accumulator = g_config->target_fps - g_retail_visual_fps;
         g_w3d_time_remainder = 0;

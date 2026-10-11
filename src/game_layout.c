@@ -1567,6 +1567,121 @@ static BOOL resolve_tint_envelope_sites(
     return calls == TINT_ENVELOPE_UPDATE_CALLS;
 }
 
+/* Radar look-at: ECX = [this+4]; convert(&world, radar); [view]->lookAt(&world). */
+static const u16 g_minimap_look_at_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x8B, 0x49, 0x04, 0x83, 0xEC, 0x0C, 0xFF, 0x75, 0x08,
+    0x8D, 0x45, 0xF4, 0x50, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x01, 0x8D, 0x55, 0xF4, 0x52, 0xFF, 0x50, 0x48, 0xC9, 0xC2, 0x04, 0x00
+};
+
+/*
+ * LookAtDragOperation mouse move: "if (point != stored point (+0x0C))" then
+ * look at it; the look-at CALL is at +0x26.
+ */
+static const u8 g_minimap_move_prologue[] = {
+    0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0xF3, 0x0F, 0x10, 0x07, 0x8B, 0xF1,
+    0x0F, 0x2E, 0x46, 0x0C
+};
+
+/* Every direct CALL/JMP rel32 to `target` in executable sections (at most `max`). */
+static BOOL find_branches_to(u8 *module, IMAGE_NT_HEADERS32 *nt, u32 image_size, u32 target,
+                             BranchSite *out, u32 max, u32 *out_count) {
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u32 count = 0;
+    u16 section_index;
+
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections;
+         ++section_index, ++section) {
+        u32 start = section->VirtualAddress;
+        u32 size = section->Misc.VirtualSize;
+        u32 offset;
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
+            start >= image_size || size > image_size - start || size < 5u) {
+            continue;
+        }
+        for (offset = 0; offset <= size - 5u; ++offset) {
+            u8 opcode = module[start + offset];
+            u32 decoded;
+            if ((opcode != 0xE8 && opcode != 0xE9) ||
+                !decode_relative_target(module, image_size, start + offset, opcode, &decoded) ||
+                decoded != target) {
+                continue;
+            }
+            if (count >= max) return FALSE;
+            out[count].instruction = start + offset;
+            out[count].target = target;
+            ++count;
+        }
+    }
+    *out_count = count;
+    return TRUE;
+}
+
+static BOOL is_minimap_move_call(const u8 *module, BranchSite call) {
+    return call.instruction >= 0x26u &&
+           memcmp(module + call.instruction - 0x26u, g_minimap_move_prologue,
+                  sizeof(g_minimap_move_prologue)) == 0;
+}
+
+static BOOL resolve_minimap_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    MinimapLayout *minimap = &game->minimap;
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u32 image_size = game->pe_size_of_image;
+    u16 section_index;
+
+    minimap->count = 0;
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections;
+         ++section_index, ++section) {
+        u32 start = section->VirtualAddress;
+        u32 size = section->Misc.VirtualSize;
+        u32 offset;
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
+            start >= image_size || size > image_size - start ||
+            size < ARRAY_COUNT(g_minimap_look_at_pattern)) {
+            continue;
+        }
+        for (offset = 0; offset <= size - ARRAY_COUNT(g_minimap_look_at_pattern); ++offset) {
+            u32 function = start + offset;
+            u32 index = minimap->count;
+            u32 view;
+            u32 calls;
+            if (!pattern_matches(module + function, g_minimap_look_at_pattern,
+                                 ARRAY_COUNT(g_minimap_look_at_pattern))) {
+                continue;
+            }
+            /* Two direct CALLs each: the drag-starting click and every drag move. */
+            if (index >= MINIMAP_LOOK_AT_MAX ||
+                !decode_relative_target(module, image_size, function + 16u, 0xE8,
+                                        &minimap->converters[index]) ||
+                !read_absolute_rva(module, image_size, function + 23u, &view) ||
+                (index > 0 && view != minimap->view_pointer) ||
+                !find_branches_to(module, nt, image_size, function, minimap->calls[index],
+                                  MINIMAP_LOOK_AT_CALLS, &calls) ||
+                calls != MINIMAP_LOOK_AT_CALLS ||
+                module[minimap->calls[index][0].instruction] != 0xE8 ||
+                module[minimap->calls[index][1].instruction] != 0xE8) {
+                return FALSE;
+            }
+            /* Exactly one call is the drag move; order them click, move. */
+            {
+                BOOL first_is_move = is_minimap_move_call(module, minimap->calls[index][0]);
+                BOOL second_is_move = is_minimap_move_call(module, minimap->calls[index][1]);
+                if (first_is_move == second_is_move) return FALSE;
+                if (first_is_move) {
+                    BranchSite swap = minimap->calls[index][0];
+                    minimap->calls[index][0] = minimap->calls[index][1];
+                    minimap->calls[index][1] = swap;
+                }
+            }
+            minimap->view_pointer = view;
+            ++minimap->count;
+        }
+    }
+    return minimap->count >= 1u;
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -1782,6 +1897,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_camera_ease_sites(module, nt, &game) ||
         !resolve_shroud_sites(module, nt, &game) ||
         !resolve_tint_envelope_sites(module, nt, &game) ||
+        !resolve_minimap_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

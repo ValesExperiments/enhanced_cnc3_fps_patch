@@ -770,9 +770,62 @@ rocket pods** have an abnormally fast idle animation.
 
 ---
 
+## B10. Minimap drag pans the camera at 30 Hz
+
+**Status:** round 4 implemented 2026-10-11, needs an in-game test.
+
+- Clicking the minimap moves the camera there; holding and dragging pans it.
+  `RadarImpl::InputHandler` (vtable TW 0xABF160) forwards mouse moves (slot
+  2, 0x7A6248) to the active drag operation; `LookAtDragOperation` (vtable
+  0xABF184) calls the radar look-at (0x7A6325) whenever the radar point
+  changes. The look-at converts radar → world (0x7A617D, `thiscall(handler,
+  &world, radar)`, `RET 8`) and calls `view->lookAt(&world)` (virtual +0x48
+  on the view global, TW 0xBEAC50), which snaps the camera. The mouse moves
+  arrive with the APT UI (~30 Hz), so panning stepped.
+- Fix: both direct calls of the look-at (the drag-starting click in
+  0x7A63DC and the drag move in 0x7A6475) go to a wrapper. If the previous
+  move was more than 100 ms ago it snaps (click). Otherwise it starts a glide
+  from the currently shown point to the new one, lasting the measured move
+  interval (clamped to 10–60 ms). The glide is advanced once per rendered
+  frame from the particle gate, which also runs while paused.
+- **Round 2.** User: smoother, but choppy with small movements. Cause: the
+  drag operation only calls the look-at when the radar point changes, so
+  slow drags produce irregular events (gaps over 100 ms were treated as
+  clicks and snapped), and each glide stopped after at most 60 ms. Now the
+  two callers are told apart by code, not timing: the move call sits at
+  +0x26 of the mouse-move handler (prologue `56 57 8B 7C 24 0C F3 0F 10 07
+  8B F1 0F 2E 46 0C`); the other is the drag operation's constructor (the
+  click). Click: snap. Move: set a target. Every rendered frame the shown
+  point closes `1 − exp(−dt / 30 ms)` of the distance and settles within
+  0.5 world units.
+- **Round 3.** User: better, but floaty (any smoothing lags). The radar
+  point is normalised 0..1 per axis and clamped by the converter
+  (0x7A617D: `world = map(point × 128)`, pure). Every real update (click
+  or move) is still looked at immediately and becomes the anchor (point,
+  `GetCursorPos`); consecutive moves teach minimap units per pixel per
+  axis (first sample, then 25% EMA; samples off by more than 2× are
+  ignored; moves under 4 px skipped). Every rendered frame while a mouse
+  button is held, the point is predicted as anchor + scale × (cursor −
+  anchor cursor), clamped to 0..1, converted and looked at. Releasing the
+  button ends prediction, so the cursor never pans the camera afterwards.
+- **Round 3b/3c (dropped).** Cursor prediction stair-stepped: the UI samples
+  the cursor before the move reaches the look-at, so snapping to each real
+  point pulled the camera back every update. A variant that only trusted
+  resting samples still didn't feel right; the user asked to revert.
+- **Round 4 (current).** As round 2 (click snaps; moves set a target; the
+  shown point follows `1 − exp(−dt / τ)` per frame, settling within 0.5
+  units) with τ = 18 ms instead of 30 ms: each game step is eased, and
+  is mostly finished before the next one (~33 ms) arrives.
+- Kane's Wrath has two radar look-at copies (two radar implementations), so
+  the resolver accepts one or two, each with exactly two direct CALLs and the
+  same view global. Patch capacity raised to 96 (KW now installs 63 writes).
+
+---
+
 ## F1. Beyond 90 FPS (120 / 144 / 160+)
 
-**Status (2026-10-11):** implemented for any rate from 91 to 240 FPS
+**Status (2026-10-11):** works; the user runs 157 FPS (matching their
+driver cap below the 160 Hz refresh) with no stutters seen. Implemented for any rate from 91 to 240 FPS
 (option (b) below, fractional scheduling); first target 160 FPS, needs an
 in-game test. B3 round 7 (resampled trails, pause freeze) was confirmed
 before this started.
