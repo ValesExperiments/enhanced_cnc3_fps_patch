@@ -507,6 +507,22 @@ enum {
     PARTICLE_SYSTEM_STORAGE = 0x84,
     PARTICLE_STORAGE_COUNT_SLOT = 5,
     PARTICLE_STORAGE_GET_SLOT = 6,
+    /*
+     * Storage casts: slot 10 (+0x28) returns the storage if it is a swarm
+     * storage, slot 11 (+0x2C) if it is a trail storage, else NULL. A draw
+     * module can sit on another storage kind (a mod's Ion Cannon pairs a trail
+     * draw with a non-trail storage); the stock draws then draw nothing.
+     */
+    PARTICLE_STORAGE_AS_SWARM_SLOT = 10,
+    PARTICLE_STORAGE_AS_TRAIL_SLOT = 11,
+    /*
+     * The system's world transform (3x4 at +0xCC), recomputed in each 30 Hz
+     * step from the attached drawable's interpolated transform. Particles
+     * attached to the bone are set to its translation (+0xD8, +0xE8, +0xF8).
+     */
+    PARTICLE_SYSTEM_WORLD_X = 0xD8,
+    PARTICLE_SYSTEM_WORLD_Y = 0xE8,
+    PARTICLE_SYSTEM_WORLD_Z = 0xF8,
     PARTICLE_POSITION = 0x10,
     PARTICLE_LIFE_REMAINING = 0x40,
     /*

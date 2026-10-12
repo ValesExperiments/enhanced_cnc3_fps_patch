@@ -34,8 +34,10 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | F2 | Game stays at 100% speed at any frame rate (even ~10 FPS) | Working (`adaptive_fps=1`); user: "feels better" (round 7) |
 | B12 | Tiberium crystals should grow and shrink (when harvested) smoothly | **Closed, kept vanilla** (2026-10-12): smoothing worked, but made the crystal glow flicker; user chose vanilla |
 | B13 | The "breathing" repair / power-off icons on buildings should animate smoothly | **Closed, kept vanilla** (2026-10-12): crossfade tried and reverted; pre-rendered 15 images/s |
-| B14 | Summoned objects (e.g. the Scrin Mothership) should fade in as slowly as in vanilla | Implemented 2026-10-12, **needs in-game test** |
-| B15 | Tiberium Vibration Scan highlight should last ~13 s (not 60+) and pulse smoothly | Implemented 2026-10-12, **needs in-game test** |
+| B14 | Summoned objects (e.g. the Scrin Mothership) should fade in as slowly as in vanilla | **Done** (confirmed 2026-10-12) |
+| B15 | Tiberium Vibration Scan highlight should last ~13 s (not 60+) and pulse smoothly | **Done** (crash fixed, confirmed 2026-10-12) |
+| B16 | Rocket smoke trails should stay connected to the rocket (they started a bit behind it) | Implemented 2026-10-12, **needs in-game test** |
+| B17 | Using the Ion Cannon in mission 1 (TW 1.9 mod) must not crash | Implemented 2026-10-12, **needs in-game test** |
 
 ## Groundwork needed first
 

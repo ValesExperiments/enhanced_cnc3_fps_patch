@@ -1123,6 +1123,18 @@ static int THISCALL draw_render_object_particles(void *module, void *a, void *b,
 }
 
 /*
+ * The system's storage as the given kind (the game's virtual cast: the swarm
+ * and trail storages return themselves, every other storage NULL), or NULL.
+ */
+typedef u8 *(THISCALL *ParticleStorageCastFn)(void *storage);
+
+static u8 *particle_storage_as(u8 *system, u32 slot) {
+    void *storage = *(void **)(system + PARTICLE_SYSTEM_STORAGE);
+    if (storage == NULL) return NULL;
+    return ((ParticleStorageCastFn)(*(void ***)storage)[slot])(storage);
+}
+
+/*
  * Swarm particles (Scrin Buzzers) keep plain records that the swarm draw turns
  * into vertices. Each 30 Hz step does "velocity += attraction; position +=
  * velocity", so while a swarm is drawn each position is temporarily moved
@@ -1142,7 +1154,7 @@ static int THISCALL draw_swarm_interpolated(void *module, void *a, void *b, void
     if (system == NULL || g_config->target_fps <= g_retail_visual_fps) {
         return original(module, a, b, c);
     }
-    storage = *(u8 **)(system + PARTICLE_SYSTEM_STORAGE);
+    storage = particle_storage_as(system, PARTICLE_STORAGE_AS_SWARM_SLOT);
     if (storage == NULL) return original(module, a, b, c);
 
     alpha = g_particle_blend_fraction;
@@ -1389,9 +1401,23 @@ typedef struct TrailHistoryEntry {
 
 static TrailHistoryEntry g_trail_history[TRAIL_HISTORY_SIZE];
 
-/* Snapshot of one trail's visible points while they are re-placed. */
+/* Snapshot of one trail's visible points (plus a projected head) while they are re-placed. */
 enum { TRAIL_CURVE_MAX = 256 };
-static TrailPoint g_trail_curve[TRAIL_CURVE_MAX];
+static TrailPoint g_trail_curve[TRAIL_CURVE_MAX + 1];
+
+/*
+ * A bone-attached trail (rocket smoke: ParticlesAttachToBone) pushes the
+ * system's world translation, taken in each 30 Hz step, as its newest point,
+ * while the rocket is drawn where it is now. Such a live trail's head is
+ * projected along its last segment by the elapsed fraction, so it ends at the
+ * rocket; the next step's point lands where the head already is. Attached
+ * means the newest point is exactly (bitwise) the system's translation.
+ */
+static BOOL trail_follows_emitter(const u8 *system, const TrailPoint *newest) {
+    return memcmp(&newest->position[0], system + PARTICLE_SYSTEM_WORLD_X, sizeof(float)) == 0 &&
+           memcmp(&newest->position[1], system + PARTICLE_SYSTEM_WORLD_Y, sizeof(float)) == 0 &&
+           memcmp(&newest->position[2], system + PARTICLE_SYSTEM_WORLD_Z, sizeof(float)) == 0;
+}
 
 static TrailHistoryEntry *track_trail(u8 *particle, BOOL alive, u32 window, u32 retail_life) {
     u32 hash = (u32)(((uintptr_t)particle >> 3) * 2654435761u);
@@ -1483,7 +1509,7 @@ static int THISCALL draw_trails_interpolated(void *module, void *a, void *b, voi
         g_config->target_fps <= g_retail_visual_fps) {
         return original(module, a, b, c);
     }
-    storage = *(u8 **)(system + PARTICLE_SYSTEM_STORAGE);
+    storage = particle_storage_as(system, PARTICLE_STORAGE_AS_TRAIL_SLOT);
     if (storage == NULL) return original(module, a, b, c);
 
     alpha = g_particle_blend_fraction;
@@ -1511,6 +1537,8 @@ static int THISCALL draw_trails_interpolated(void *module, void *a, void *b, voi
         float finish;
         BOOL tail_slides;
         BOOL head_grows;
+        BOOL head_projects = FALSE;
+        u32 last_segment;
         u32 j;
 
         /* Live trails beyond TrailLife + 1 points are trimmed by the draw. */
@@ -1547,8 +1575,23 @@ static int THISCALL draw_trails_interpolated(void *module, void *a, void *b, voi
         }
         start = tail_slides && points >= 2u ? alpha : 0.0f;
         finish = (float)(points - 1u);
-        if (head_grows && points >= 2u) finish -= 1.0f - alpha;
+        if (alive && !stopping && points >= 2u &&
+            trail_follows_emitter(system, &g_trail_curve[points - 1u])) {
+            TrailPoint *newest = &g_trail_curve[points - 1u];
+            const TrailPoint *before = &g_trail_curve[points - 2u];
+            TrailPoint *ahead = &g_trail_curve[points];
+            u32 k;
+            *ahead = *newest;
+            for (k = 0; k < 3; ++k) {
+                ahead->position[k] = newest->position[k] + (newest->position[k] - before->position[k]);
+            }
+            head_projects = TRUE;
+            finish += alpha;
+        } else if (head_grows && points >= 2u) {
+            finish -= 1.0f - alpha;
+        }
         if (finish < start) finish = start;
+        last_segment = head_projects ? points - 1u : points - 2u;
         for (j = 0; j < drawn; ++j) {
             float u = start + (finish - start) * (float)j / (float)(drawn - 1u);
             u32 k = (u32)u;
@@ -1558,7 +1601,7 @@ static int THISCALL draw_trails_interpolated(void *module, void *a, void *b, voi
                                   &saved, &colours_saved);
                 continue;
             }
-            if (k > points - 2u) k = points - 2u;
+            if (k > last_segment) k = last_segment;
             blend_trail_point(point, &g_trail_curve[k], &g_trail_curve[k + 1u], u - (float)k,
                               &saved, &colours_saved);
         }

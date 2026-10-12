@@ -992,7 +992,7 @@ fine), so the code was removed.
 
 ## B15. Tiberium Vibration Scan highlight lasts 60+ s and pulses at 15 Hz
 
-**Status:** implemented 2026-10-12, needs an in-game test.
+**Status:** done (crash fixed; confirmed in-game 2026-10-12).
 
 ### Cause (TW 1.10 VAs)
 - `RadarScanMapSpecialAbilityUpdate` (Scrin Control Center): `FUN_00632F4F`
@@ -1025,6 +1025,83 @@ fine), so the code was removed.
 - Signatures: the play site (`PUSH [ESI+…]` ×3, `LEA EDX`, `CALL`) and the
   getter (its GameLogic operand must equal the particle gate's). Verified on
   all four builds.
+
+---
+
+## B16. Rocket smoke trails start behind the rocket
+
+**Status:** implemented 2026-10-12, needs an in-game test (screenshots:
+GDI missile soldiers in mission 1).
+
+### Cause (TW 1.10 VAs)
+- The missile (`GDIMissileSoldierMissileProjectile`) has a `ParticleSysBone`
+  with `FollowBone="true"` and the system `OrcaMissileTrail`: `Type="TRAIL"`,
+  one particle, `ParticlesAttachToBone="true"`, `TrailLife="90"`.
+- `ParticleSystem::update` (`0x5B8D6A`, run only by the gated 30 Hz update):
+  - reads the attached drawable's interpolated transform;
+  - stores the system position (+0x14, previous at +0x20);
+  - recomputes the world matrix (3×4 at +0xCC) from the local one (+0x9C).
+- The attached particle's physics step (`0x5B3C05`, flag +0xD) sets the
+  particle to that matrix's translation (`0x5AD464`: +0xD8/+0xE8/+0xF8). The
+  trail storage update (`0x5C09EA`) then pushes the particle position as the
+  newest point (`0x5BB5E8`).
+- So the newest point is the rocket's position at the last 30 Hz step,
+  while the rocket is drawn where it is now. Our trail wrapper (B3) grew the
+  head from the previous point *toward* the newest one, so the drawn head
+  trailed the rocket by about one step of travel. At 30 FPS every frame is a
+  step, so it connects.
+
+### Fix
+- For a live, non-stopping trail whose newest point is bitwise equal to the
+  system's world translation (only bone-attached trails), the visible curve
+  gets one extra point: the newest point plus the last segment. The head
+  ends at `points − 1 + α` on it, i.e. projected forward by the elapsed
+  fraction (like CPU particles).
+- The next step's point lands where the head already is, so nothing jumps.
+- Free-flying trails (repair sparks, which decelerate) keep the old
+  grow-toward behaviour, so they don't overshoot.
+- Signature: the attach function (`8D 81 CC 00 00 00 …`), unique in all four
+  builds.
+
+---
+
+## B17. Ion Cannon crash (mission 1, TW 1.9 mod)
+
+**Status:** implemented 2026-10-12, needs an in-game test.
+
+### Cause
+- Crash dump (`%LOCALAPPDATA%\CrashDumps\cnc3game.dat.8784.dmp`, copied to
+  `temp/crash_ion/`): an access violation reading `0xB1` in our DLL
+  (`+0xCF05`).
+  - Symbolised with the release PDB: `draw_trails_interpolated`, at
+    `MOV EBX,[EDI+8]`, the start of `trail_point_count(record)`, with
+    record = `0xA9`.
+  - The deployed DLL's code was byte-identical to the build used to
+    symbolise it.
+  - Tools: `tools_and_docs_by_claude/crash_dump.py` and a PDB
+    `S_GPROC32`/`S_LPROC32` scan.
+- The stock `TrailDrawModule_Draw` (`0x5BB4D3`) never reads
+  `system+0x84` directly:
+  - it calls the storage's **slot 0x2C**, "as trail storage", which
+    returns `this` for `TrailSystemStorageModule` and NULL for every other
+    storage class;
+  - it only draws when the flag `0xBF4DCD` is set, which the trail
+    begin-draw (`0x5B12D2`) sets only when that cast succeeds.
+- So a trail draw module on a non-trail storage, which the mod's Ion Cannon
+  effect evidently has, draws nothing in vanilla. Our wrapper read the
+  wrong object's fields as trail records and crashed.
+- The swarm wrapper had the same latent bug: the stock swarm builder
+  (`0x5B4D8C`) casts through **slot 0x28**.
+
+### Fix
+- `particle_storage_as(system, slot)` makes the game's own virtual cast.
+- The trail and swarm wrappers call the original untouched when it returns
+  NULL.
+- Signatures:
+  - the trail-draw pattern now includes `FF 50 2C 8B F0`;
+  - the swarm vertex builder pattern pins `FF 50 28`.
+
+  Both are verified unique on all four builds.
 
 ---
 

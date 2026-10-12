@@ -330,3 +330,16 @@ Fix or remove anything that turns out to be wrong.
 - `docs/goals_detailed.md`: hypotheses, plans, acceptance criteria.
 - `docs/implementation.md`: the original author's detailed implementation
   notes.
+- **Crash analysis workflow (2026-10-12, B17):** Windows keeps game crash dumps in
+  `%LOCALAPPDATA%\CrashDumps\cnc3game.dat.<pid>.dmp`; match the time to the end of
+  `fps_patch.log` in the game folder. Copy it to `temp/` and run
+  `tools_and_docs_by_claude/crash_dump.py <dmp> [stack dwords] [hex addrs]`
+  (exception, registers, module bases, return addresses; stacks only, no heap).
+  For a fault inside our `dinput8.dll`, first compare its .text with the
+  current build (pefile). If they're identical, scan
+  `zig-out/lib/dinput8-release.pdb` for S_GPROC32/S_LPROC32 records to name the
+  function (zig's linker has no /map). Use the Ghidra MCP `run_python` to
+  disassemble raw bytes if needed.
+- **Lesson (B17):** when wrapping a stock draw/update, mirror the stock code's
+  *virtual casts and guards* (e.g. particle storage slot 0x2C "as trail", 0x28
+  "as swarm"). Mods pair modules in combinations vanilla never uses.
