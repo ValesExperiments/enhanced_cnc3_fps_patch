@@ -101,10 +101,12 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
   repays time lost to heavy logic frames. It times the game's logic
   directly, judges over 2 seconds, drops only when the game really runs
   slow (a driver frame cap no longer fools it, never more than halfway at
-  once) and rises after a second of clearly low load. When the logic alone
-  fills the CPU (huge battles), it stays at 30 FPS or more, since lower
-  rates can't help then. The game's own heavy-logic hitches remain, as in
-  vanilla.
+  once) and rises after a second of clearly low load. It only goes very
+  low (down to 5 FPS) when that really buys the game speed back, and it
+  notices an outside frame cap (e.g. an NVIDIA limit equal to the target)
+  and settles just below it instead of bouncing. Best results: no driver
+  frame cap for this game, since the mod limits itself. The game's own
+  heavy-logic hitches remain, as in vanilla.
 - **F1:** Above 90 FPS some frames must run no logic at all. A new
   scheduler gives each 15 Hz logic tick 10 or 11 frames (160 FPS: 11, 11,
   10), runs its six logic phases spread across them (phase 1 on the first

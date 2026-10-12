@@ -170,9 +170,16 @@ Fix or remove anything that turns out to be wrong.
   Round 6 replaced the regression: logic is **timed directly** (QPC around
   each dispatch), and drops require real slowness (frame speed < 97%), not
   just load. The user runs an **NVIDIA driver cap equal to target_fps**:
-  that wait counts as frame "work" (load reads 100%+ with nothing slow).
-  When logic alone exceeds ~800 ms per game second, lower frame rates
-  can't restore speed, so the floor is 30 FPS (temp/model_sim6.py).
+  that wait counts as frame "work" (load reads 100%+ with nothing slow),
+  and it blocks catching up after heavy logic frames, so heavy scenes can't
+  hold the target (round 7 detects it and sets a lasting ceiling 4% below).
+  **Don't hard-code "logic-bound → stay at 30"** (round 6): in the user's
+  late-game battle drawing was ~40 ms/frame, 5 FPS ran at 100% speed and
+  the forced 30 FPS ran at 30–50% for minutes. Decide with the measured
+  model (fixed ms/s + rate × drawing), and never jump *up* to a floor.
+  Below-15 catch-up is confirmed to keep 100% game ticks in skirmish.
+  When simulating a driver cap, the driver only waits when Presents come
+  faster than 1/cap; don't model it as a minimum frame time at every rate.
   `g_config->target_fps <= 30` stays only as the
   "patch active" guard. The game's integer rate globals must never go below
   15 (stock code divides by `clientFPS/15`).

@@ -987,6 +987,52 @@ per frame. Frames that take longer than 1/target therefore slow everything.
     with a driver cap at 156 holds 156; logic 930 ms/s → 30 FPS (97%);
     slow drawing → 10 FPS. Heavy load with a driver cap of exactly the
     target drops to ~107: the cap leaves no room to repay overruns.
+- **Round 7 (effects timing, 5% floor, outside-cap ceiling).** The user's
+  next run (TW 1.9, target 156, NVIDIA cap 156; ~10 min skirmish):
+  - Near the max it alternated 156 ↔ 129–150 even in calm play. At 156 the
+    "drawing" read 5.2–6.4 ms; right after dropping, the same scene drew in
+    1.9–3.4 ms. The difference was waiting on the driver cap: with the cap
+    equal to the target, the limiter can never catch up after a heavy logic
+    frame, so the game ran at 94–98% of 156 → drop → plenty of room → raise
+    → … At 150 it held 100% for 24 s.
+  - The round-6 logic-bound floor was wrong: at 5 FPS the late-game battle
+    ran at **100% game speed** (logic 600–735 ms/s, drawing ~40 ms/frame).
+    A brief logic reading of 816 ms/s forced 30 FPS, and the game then ran
+    at **30–50% speed for over 3 minutes**. Lower rates did help: the drawing
+    itself was huge.
+  - Confirmed: below-15 catch-up keeps real time ("game ticks" 99–103% at
+    5–10 FPS).
+  - "Drawing" per frame grew as the rate fell (8.7 ms at 45 → ~40 ms at 5)
+    partly because each frame runs several 30 Hz particle/audio steps below
+    30 FPS.
+  Now:
+  - The particle and audio updates are timed too (`g_frame_effects_us`,
+    steps). Fixed cost per second = logic (per tick × 15) + effects (per
+    step × 30); drawing = (work − logic − effects) per frame.
+  - Drop target: the rate fitting 90%; if none ≥ 5, the rate fitting 98%;
+    if even 5 FPS can't hold full speed, the highest rate losing at most 5%
+    speed against the best reachable (speed capped at 100%). That last value
+    is also the floor for drops. There is no more "jump up to the floor"
+    (that caused the 30 FPS disaster); only the normal raise path goes up.
+  - Outside-limit ceiling: on the first judgement after a drop, if the old
+    rate's per-frame drawing was > 1.3 × the new one + 0.5 ms (real drops
+    from a heavier scene measured 1.03–1.15×; the cap drops 1.8–2.7×), the
+    old rate waited on something outside (driver cap or GPU). It sets a
+    lasting ceiling at 96% of that rate (156 → 149), kept across sessions
+    for the process, and logs it. Sessions then start at that ceiling.
+  - Simulated (temp/model_sim7.py, now with 30 Hz effect cost and a correct
+    driver-cap model where the driver holds Present until 1/cap after the
+    previous one): light / 7-AI / stock starts / calm game and menu at cap
+    156 stay put; busy game with cap 156 reproduces the user's churn, then
+    detects the cap and settles below it; logic 930 ms/s → 15 FPS at 100%;
+    the user's battle → 6 FPS; slow drawing → 10 FPS.
+  - **Driver caps and heavy logic:** after a heavy logic frame (~14 ms
+    phase), the next frames must run faster than the target to catch up.
+    Any cap close to the target forbids that. Simulated "heavy 7 AIs" at
+    target 156 holds 156 with no cap, but settles at ~107 with a cap of 156,
+    160 or 164. With a 165 cap, target 138 or lower holds. Advice: no driver
+    cap for this game (the mod limits itself), or a target ~15–20% under the
+    cap.
 - **Supported rates:** the target; above 90 any rate; 15–90 multiples of 15
   (the stock schedule needs whole frames per tick); below 15 any whole number,
   down to 5.

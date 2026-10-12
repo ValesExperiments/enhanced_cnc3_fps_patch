@@ -33,7 +33,21 @@ static u32 g_rate_pending = 30u;
 static u32 g_frame_phases;
 /* Microseconds spent in logic dispatches this frame (adaptive pacing). */
 static u32 g_frame_logic_us;
+/* Microseconds and steps of the 30 Hz particle/audio updates this frame. */
+static u32 g_frame_effects_us;
+static u32 g_frame_effects_steps;
 static LARGE_INTEGER g_logic_timer_frequency;
+
+static u32 microseconds_since(const LARGE_INTEGER *start) {
+    LARGE_INTEGER end;
+
+    QueryPerformanceCounter(&end);
+    if (g_logic_timer_frequency.QuadPart == 0) {
+        QueryPerformanceFrequency(&g_logic_timer_frequency);
+    }
+    return (u32)((end.QuadPart - start->QuadPart) * 1000000 /
+                 g_logic_timer_frequency.QuadPart);
+}
 static void monitor_frame_pacing(u32 interval_ms);
 static void apply_live_camera_settings(void);
 /* Elapsed fraction of the current 30 Hz particle step; frozen while paused. */
@@ -260,17 +274,11 @@ static BOOL logic_tick_running(void) {
  */
 static void dispatch_counted(u8 *engine, u32 phase) {
     LARGE_INTEGER start;
-    LARGE_INTEGER end;
     u32 after;
 
     QueryPerformanceCounter(&start);
     g_original_dispatch_logic_phase(engine, phase);
-    QueryPerformanceCounter(&end);
-    if (g_logic_timer_frequency.QuadPart == 0) {
-        QueryPerformanceFrequency(&g_logic_timer_frequency);
-    }
-    g_frame_logic_us += (u32)((end.QuadPart - start.QuadPart) * 1000000 /
-                              g_logic_timer_frequency.QuadPart);
+    g_frame_logic_us += microseconds_since(&start);
     if (phase == 1u && !logic_tick_running()) return;
     after = *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE);
     g_frame_phases += after >= phase ? after - phase + 1u : 1u;
@@ -798,9 +806,14 @@ static void THISCALL update_particles_at_retail_rate(void *manager) {
      */
     g_particle_update_accumulator += g_retail_visual_fps;
     while (g_particle_update_accumulator >= g_rate) {
+        LARGE_INTEGER start;
+
         g_particle_update_accumulator -= g_rate;
         ++g_particle_sim_tick;
+        QueryPerformanceCounter(&start);
         update(manager);
+        g_frame_effects_us += microseconds_since(&start);
+        ++g_frame_effects_steps;
     }
     /*
      * While particles are not simulated (e.g. the game is paused), drawing
@@ -1932,8 +1945,12 @@ static u8 THISCALL update_audio_at_retail_rate(void *audio_manager) {
     /* Below 30 FPS (adaptive pacing) a frame services audio more than once. */
     g_audio_update_accumulator += g_retail_visual_fps;
     while (g_audio_update_accumulator >= g_rate) {
+        LARGE_INTEGER start;
+
         g_audio_update_accumulator -= g_rate;
+        QueryPerformanceCounter(&start);
         result = g_original_audio_update(audio_manager);
+        g_frame_effects_us += microseconds_since(&start);
     }
     return result;
 }
@@ -2656,15 +2673,19 @@ static void install_shroud_timing(PatchInstaller *installer) {
  * rate (15 ticks of 6 phases); only drawing scales with the rate. So the
  * monitor records each frame's work (time since the limiter's previous wait
  * ended, the stock stamp), its period, and the time spent in logic dispatches
- * (timed directly), then over the last two seconds derives the logic cost per
- * game second and the drawing cost per frame. The highest rate whose second
- * still fits is (budget - logic) / drawing. It drops when the game really
- * runs slow (frames arrive under 97% of the rate; outside waits such as a
- * driver frame cap don't count) and rises after a second of load under 75%.
- * When logic alone fills most of a second, lower rates can't restore the
- * speed, so it stays at 30 FPS or more. A rise that fails within 3 s leaves a
- * ceiling that is retried gently. Rate changes apply at the start of a logic
- * tick and re-time every rate-dependent value.
+ * and in the 30 Hz particle/audio updates (timed directly). Over the last two
+ * seconds it derives the fixed cost per second (logic and effects, the same
+ * at any rate) and the drawing cost per frame. The highest rate whose second
+ * still fits is (budget - fixed) / drawing. It drops when the rate doesn't
+ * fit and the game really runs slow (frames under 97% of the rate) and rises
+ * after a second of load under 75%. When even the minimum rate can't hold
+ * full speed, it drops no lower than the highest rate losing at most 5%
+ * speed against the best reachable, so a near-useless crawl to 5 FPS is
+ * avoided. A rise that fails within 3 s leaves a ceiling that is
+ * retried gently; a drop whose per-frame time shrinks far more than the
+ * rate (the old rate waited on an outside cap, e.g. a driver frame limit or
+ * the GPU) leaves a lasting ceiling 4% below that rate. Rate changes apply
+ * at the start of a logic tick and re-time every rate-dependent value.
  */
 enum {
     MIN_ADAPTIVE_FPS = 5,
@@ -2679,7 +2700,6 @@ enum {
     PACING_WINDOW_MS = 2000,      /* real time judged */
     PACING_SKIP_MS = 250,
     PACING_STATUS_MS = 10000,     /* status line interval */
-    LOGIC_BOUND_MS = 800,         /* logic per game second that pins the rate at >= 30 */
     PHASES_PER_SECOND = LOGIC_FPS * LOGIC_PHASE_COUNT
 };
 
@@ -2688,6 +2708,8 @@ typedef struct PacingSample {
     u32 period_ms;
     u32 phases;
     u32 logic_us;
+    u32 effects_us;
+    u32 effects_steps;
 } PacingSample;
 
 static PacingSample g_pacing_samples[PACING_WINDOW_MAX];
@@ -2702,6 +2724,11 @@ static u32 g_pacing_ceiling;
 static u32 g_pacing_ceiling_frames;
 static u32 g_pacing_retry_ms = CEILING_RETRY_MS;
 static u32 g_pacing_previous_call_ms;
+/* Lasting ceiling below an outside frame limit (driver cap, GPU); 0 = none. */
+static u32 g_pacing_outside_ceiling;
+/* The rate and per-frame drawing time before the last drop. */
+static u32 g_pacing_drop_from;
+static double g_pacing_drop_drawing;
 static u32 g_pacing_epoch_ms;
 static u32 g_pacing_next_status_ms;
 
@@ -2720,8 +2747,11 @@ static void reset_pacing_monitor(void) {
     g_pacing_ceiling_frames = 0;
     g_pacing_retry_ms = CEILING_RETRY_MS;
     g_pacing_previous_call_ms = 0;
+    g_pacing_drop_from = 0;
     g_frame_phases = 0;
     g_frame_logic_us = 0;
+    g_frame_effects_us = 0;
+    g_frame_effects_steps = 0;
 }
 
 static u32 frames_for_ms(u32 ms, u32 rate) {
@@ -2755,9 +2785,9 @@ static u32 supported_rate_at_most(double fps) {
     return rate;
 }
 
-/* Highest rate whose second (all logic plus drawing) fits `fraction` of it. */
-static double rate_fitting(double fraction, double drawing_ms, double phase_cost_ms) {
-    double free_ms = 1000.0 * fraction - PHASES_PER_SECOND * phase_cost_ms;
+/* Highest rate whose second (fixed costs plus drawing) fits `fraction` of it. */
+static double rate_fitting(double fraction, double drawing_ms, double fixed_ms) {
+    double free_ms = 1000.0 * fraction - fixed_ms;
     if (free_ms <= 0.0) return 0.0;
     return free_ms / drawing_ms;
 }
@@ -2774,29 +2804,39 @@ static void monitor_frame_pacing(u32 interval_ms) {
     u32 period_ms = now - g_pacing_previous_call_ms;
     u32 phases = g_frame_phases;
     u32 logic_us = g_frame_logic_us;
+    u32 effects_us = g_frame_effects_us;
+    u32 effects_steps = g_frame_effects_steps;
     u32 window;
     u32 i;
+    u32 seconds;
     double n;
     double sum_work = 0.0, sum_period = 0.0, sum_phases = 0.0, sum_logic_ms = 0.0;
+    double sum_effects_ms = 0.0, sum_effects_steps = 0.0;
     double ticks;
     double logic_per_second;
-    double phase_cost;
+    double effects_per_second;
+    double fixed;
     double drawing;
     double load;
     double speed;
     double tick_speed;
+    double best_speed;
+    double fit_rate;
     u32 floor_rate;
     u32 target_rate;
 
     (void)interval_ms;
     g_frame_phases = 0;
     g_frame_logic_us = 0;
+    g_frame_effects_us = 0;
+    g_frame_effects_steps = 0;
     if (!g_config->adaptive_fps || g_config->target_fps <= g_retail_visual_fps) return;
     if (g_pacing_epoch_ms == 0u) {
         g_pacing_epoch_ms = now;
         g_pacing_next_status_ms = now + PACING_STATUS_MS;
     }
     g_pacing_previous_call_ms = now;
+    seconds = (now - g_pacing_epoch_ms) / 1000u;
     /* Loading stalls say nothing about the frame rate the game can hold. */
     if (work_ms > PACING_SKIP_MS || period_ms > PACING_SKIP_MS) return;
     /* After a switch, let the new schedule settle before judging again. */
@@ -2819,6 +2859,8 @@ static void monitor_frame_pacing(u32 interval_ms) {
     g_pacing_samples[g_pacing_sample_next].period_ms = period_ms;
     g_pacing_samples[g_pacing_sample_next].phases = phases;
     g_pacing_samples[g_pacing_sample_next].logic_us = logic_us;
+    g_pacing_samples[g_pacing_sample_next].effects_us = effects_us;
+    g_pacing_samples[g_pacing_sample_next].effects_steps = effects_steps;
     g_pacing_sample_next = (g_pacing_sample_next + 1u) % PACING_WINDOW_MAX;
     if (g_pacing_sample_count < PACING_WINDOW_MAX) ++g_pacing_sample_count;
     ++g_pacing_frames_since_raise;
@@ -2831,15 +2873,20 @@ static void monitor_frame_pacing(u32 interval_ms) {
         sum_period += (double)sample->period_ms;
         sum_phases += (double)sample->phases;
         sum_logic_ms += (double)sample->logic_us / 1000.0;
+        sum_effects_ms += (double)sample->effects_us / 1000.0;
+        sum_effects_steps += (double)sample->effects_steps;
     }
     window = i;
     if (window < PACING_WINDOW_MIN || sum_period < PACING_WINDOW_MS / 2u) return;
     n = (double)window;
-    /* Logic per game second, measured directly (0 while the game is paused). */
+    /* Fixed costs per second, measured directly (0 while paused). */
     ticks = sum_phases / LOGIC_PHASE_COUNT;
     logic_per_second = ticks >= 1.0 ? sum_logic_ms / ticks * LOGIC_FPS : 0.0;
-    phase_cost = logic_per_second / PHASES_PER_SECOND;
-    drawing = (sum_work - sum_logic_ms) / n;
+    effects_per_second = sum_effects_steps >= 1.0
+                             ? sum_effects_ms / sum_effects_steps * g_retail_visual_fps
+                             : 0.0;
+    fixed = logic_per_second + effects_per_second;
+    drawing = (sum_work - sum_logic_ms - sum_effects_ms) / n;
     if (drawing < 0.3) drawing = 0.3;
     /* Share of each second this rate uses (outside waits included). */
     load = sum_work / n * (double)g_rate / 1000.0;
@@ -2851,24 +2898,50 @@ static void monitor_frame_pacing(u32 interval_ms) {
     if ((i32)(now - g_pacing_next_status_ms) >= 0) {
         g_pacing_next_status_ms = now + PACING_STATUS_MS;
         log_printf("Adaptive pacing [%us]: %u FPS, frames %.0f%%, game ticks %.0f%%, "
-                   "logic %.0f ms/s, drawing %.2f ms/frame, load %.0f%%",
-                   (now - g_pacing_epoch_ms) / 1000u, g_rate, speed * 100.0,
-                   tick_speed * 100.0, logic_per_second, drawing, load * 100.0);
+                   "logic %.0f ms/s, effects %.0f ms/s, drawing %.2f ms/frame, load %.0f%%",
+                   seconds, g_rate, speed * 100.0, tick_speed * 100.0, logic_per_second,
+                   effects_per_second, drawing, load * 100.0);
     }
 
     /*
-     * When logic alone fills most of a second, no frame rate restores the
-     * speed; going lower only makes the game choppy. Stay at 30 or more.
+     * First judgement after a drop: if the old rate's per-frame time was far
+     * above this one's, the old rate waited on something outside the game
+     * (a driver frame cap, or the GPU). Stay 4% below it from now on.
      */
-    floor_rate = logic_per_second > LOGIC_BOUND_MS ? 30u : MIN_ADAPTIVE_FPS;
-    if (floor_rate > g_config->target_fps) floor_rate = g_config->target_fps;
-    if (g_rate < floor_rate) {
-        log_printf("Adaptive pacing [%us]: logic %.0f ms/s fills the CPU at %u FPS; "
-                   "lower rates can't help, back to %u",
-                   (now - g_pacing_epoch_ms) / 1000u, logic_per_second, g_rate, floor_rate);
-        g_pacing_rate_before_raise = 0;
-        switch_pacing_rate(floor_rate);
-        return;
+    if (g_pacing_drop_from != 0u) {
+        if (g_rate < g_pacing_drop_from &&
+            g_pacing_drop_drawing > 1.3 * drawing + 0.5) {
+            u32 ceiling = supported_rate_at_most((double)g_pacing_drop_from * 0.96);
+            if (ceiling >= g_rate &&
+                (g_pacing_outside_ceiling == 0u || ceiling < g_pacing_outside_ceiling)) {
+                g_pacing_outside_ceiling = ceiling;
+                log_printf("Adaptive pacing [%us]: %u FPS took %.2f ms/frame against %.2f "
+                           "here; an outside limit (driver frame cap or GPU) holds near "
+                           "%u FPS, staying at or below %u",
+                           seconds, g_pacing_drop_from, g_pacing_drop_drawing, drawing,
+                           g_pacing_drop_from, ceiling);
+            }
+        }
+        g_pacing_drop_from = 0;
+    }
+
+    /*
+     * Drop target: the rate whose second fits 90%. If none does, the rate
+     * that still fits 98%. If even the minimum rate can't hold full speed
+     * (logic or effects fill the CPU), the highest rate losing at most 5%
+     * speed against the best reachable: a crawl to 5 FPS only when it buys
+     * the speed back. Drops never go below that.
+     */
+    floor_rate = MIN_ADAPTIVE_FPS;
+    fit_rate = rate_fitting(0.90, drawing, fixed);
+    if (fit_rate < MIN_ADAPTIVE_FPS) fit_rate = rate_fitting(0.98, drawing, fixed);
+    if (fit_rate < MIN_ADAPTIVE_FPS) {
+        best_speed = 1000.0 / (fixed + MIN_ADAPTIVE_FPS * drawing);
+        if (best_speed > 1.0) best_speed = 1.0;
+        fit_rate = best_speed > 0.1
+                       ? (1000.0 / (best_speed - 0.05) - fixed) / drawing
+                       : (double)MIN_ADAPTIVE_FPS;
+        floor_rate = supported_rate_at_most(fit_rate);
     }
 
     /*
@@ -2879,11 +2952,14 @@ static void monitor_frame_pacing(u32 interval_ms) {
      * below the floor.
      */
     if (load > 1.00 && speed < 0.97) {
-        target_rate = supported_rate_at_most(rate_fitting(0.90, drawing, phase_cost));
+        target_rate = supported_rate_at_most(fit_rate);
         if (target_rate < g_rate / 2u) {
             target_rate = supported_rate_at_most((double)g_rate / 2.0);
         }
         if (target_rate < floor_rate) target_rate = floor_rate;
+        if (g_pacing_outside_ceiling != 0u && target_rate > g_pacing_outside_ceiling) {
+            target_rate = g_pacing_outside_ceiling;
+        }
         if (target_rate < g_rate) {
             if (g_pacing_frames_since_raise < frames_for_ms(FAILED_RAISE_MS, g_rate) &&
                 g_pacing_rate_before_raise != 0u && g_pacing_rate_before_raise < g_rate) {
@@ -2895,27 +2971,32 @@ static void monitor_frame_pacing(u32 interval_ms) {
                 if (target_rate < g_pacing_ceiling) target_rate = g_pacing_ceiling;
                 g_pacing_rate_before_raise = 0;
             }
-            log_printf("Adaptive pacing [%us]: frames %.0f%%, logic %.0f ms/s, drawing %.2f "
-                       "ms/frame, load %.0f%% at %u FPS; drop to %u",
-                       (now - g_pacing_epoch_ms) / 1000u, speed * 100.0, logic_per_second,
+            log_printf("Adaptive pacing [%us]: frames %.0f%%, logic %.0f ms/s, effects %.0f "
+                       "ms/s, drawing %.2f ms/frame, load %.0f%% at %u FPS; drop to %u",
+                       seconds, speed * 100.0, logic_per_second, effects_per_second,
                        drawing, load * 100.0, g_rate, target_rate);
+            g_pacing_drop_from = g_rate;
+            g_pacing_drop_drawing = drawing;
             switch_pacing_rate(target_rate);
             return;
         }
     }
     /* Rise after a second of clearly low load; at most 1.5x per step. */
-    target_rate = supported_rate_at_most(rate_fitting(0.85, drawing, phase_cost));
+    target_rate = supported_rate_at_most(rate_fitting(0.85, drawing, fixed));
     if (target_rate > (u32)(g_rate * 3u / 2u)) {
         target_rate = supported_rate_at_most((double)g_rate * 1.5);
     }
     if (g_pacing_ceiling != 0u && target_rate > g_pacing_ceiling) {
         target_rate = supported_rate_at_most((double)g_pacing_ceiling);
     }
+    if (g_pacing_outside_ceiling != 0u && target_rate > g_pacing_outside_ceiling) {
+        target_rate = g_pacing_outside_ceiling;
+    }
     if (target_rate > g_rate && load < 0.75) {
         if (++g_pacing_headroom_frames >= frames_for_ms(RATE_RAISE_MS, g_rate)) {
-            log_printf("Adaptive pacing [%us]: frames %.0f%%, logic %.0f ms/s, drawing %.2f "
-                       "ms/frame, load %.0f%% at %u FPS; raise to %u",
-                       (now - g_pacing_epoch_ms) / 1000u, speed * 100.0, logic_per_second,
+            log_printf("Adaptive pacing [%us]: frames %.0f%%, logic %.0f ms/s, effects %.0f "
+                       "ms/s, drawing %.2f ms/frame, load %.0f%% at %u FPS; raise to %u",
+                       seconds, speed * 100.0, logic_per_second, effects_per_second,
                        drawing, load * 100.0, g_rate, target_rate);
             g_pacing_rate_before_raise = g_rate;
             g_pacing_frames_since_raise = 0;
@@ -3394,6 +3475,9 @@ void game_patches_reset_state(void) {
     if (g_config != NULL) {
         /* Each session starts at the configured rate; pacing lowers it if needed. */
         g_rate = g_config->target_fps;
+        if (g_pacing_outside_ceiling != 0u && g_pacing_outside_ceiling < g_rate) {
+            g_rate = g_pacing_outside_ceiling;
+        }
         g_rate_pending = g_rate;
         reset_pacing_monitor();
         g_retail_started = FALSE;
