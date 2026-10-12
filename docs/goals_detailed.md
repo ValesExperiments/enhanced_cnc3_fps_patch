@@ -1368,7 +1368,8 @@ case-insensitive; skipped features are logged). Names:
 `shroud_timing` (B7), `tint_envelope_timing` (B9), `minimap_glide` (B10),
 `waypoint_lines` (B11), `effect_timing` (B14/B15), `particle_index` (M1),
 `trail_vertex_fix` (M3a), `frame_boundary`, `range_stats`,
-`apt_call_counter` (B20 tick + debug_apt_calls), `spawn_logger`,
+`apt_call_counter` (debug_apt_calls), `button_enable_tick` (B20),
+`spawn_logger`,
 `drawable_interpolation_window` (B4), `particle_and_cursor_timing` (B3),
 `phase_scheduler`, `w3d_clock`, `frame_limiter`. The last three (and
 `frame_boundary`) are core to running above 30 FPS.
@@ -1459,6 +1460,76 @@ gone, and teleporting units look fine):**
 every 5 frames (`Title`/`HotKey`/`Text`, `OnInitialized` → `OnOpen`). Nothing
 reaches the button grid through queued calls or variable sets, so the grid
 changes reach Flash another way (still open).
+
+**How the build menu is built (2026-10-12, TW 1.10 RE; Flash read with
+`temp/b20_ui/aptdis.py`, an Apt bytecode disassembler for the compiled
+`data\aptui\*.bin` assets, RefPack-decompressed with `temp/b20_ui/refpack.py`):**
+- **Menu (Flash):** `TacticalHUDBuildQueuePage` holds one page per type tab
+  (`InsertPage` → `attachMovie("BuildQueuePage")`). Each page sets
+  `disableCommandButtonLoadAnim = true` and loads
+  `TacticalHUDCommandListBox.swf` (the grid: 3 columns, 64×64 slots, 4
+  visible rows). C++ drives the grid with `SetButtonSlotCount` /
+  `InsertButtonSlot` / `EraseButtonSlot`. Every slot is
+  `attachMovie("LoadMovieStage")`, reported back with
+  `FSCommand <grid>:OnButtonSlotStageCreated index=..&name=..`.
+- **Menu (C++):** `InGameUI::Tactical::BuildQueue` (`Registry`,
+  `TypePageSet`, `PageObserver`, `BuildQueueUIManager`), the grid gadget
+  `InGameUI::Gadget::CommandList` (`0x7A11F7` = its `OnInitialized`:
+  listener + `SetButtonSlotCount`; `0x7A0FBF` = `OnButtonSlotStageCreated`).
+- **One tile (e.g. the Crane):** `InGameUI::Tactical::BuildButton` (ctor
+  `0x7AC362`; `StructureButton::ActualButton` vtable `0xABD3CC`,
+  `UnitButton::ActualButton` `0xABD46C`) owns a
+  `Gadget::StandardCommandButton` (ctor `0x785372`), which loads
+  `StandardCommandButton.swf` into the slot stage (`FUN_00770962`). The tile
+  movie's frame-0 script calls `_parent.OnContentLoaded(this)` and
+  `FSCommand :OnInitialized`; the C++ handler `0x785256` registers
+  OnClicked/OnRollOver/OnRollOut and pushes the whole state (SetEnabled,
+  SetVisibility, SetSelected, SetNumberVisibility, SetTimerVisibility/Value,
+  SetImageTint). The icon is a `RenderImage` clip whose `_imageMap` is
+  `<tile>:Image` (set in its `Load` clip event).
+- **State logic:** `BuildButton::Refresh` (`0x7AC486`):
+  - *locked* (`FUN_0049DBB3`: prerequisite missing): once, on the change,
+    locked image, number/timer hidden, `SetEnabled(false)`, flag +0x35;
+  - *unlocked*: normal image (if it was locked), queue count, progress
+    timer, then virtual +0x34 decides enabled. For structures (`0x7ABE49`):
+    enabled when it's the one being built/ready, else
+    `BuildAssistant::canMakeUnit` (`[0xBF36D0]` vtable +0x5C); a refusal
+    ("factory busy" while the Crane is in production) → `SetEnabled(false)`
+    (`0x7AC1D6`), OK → `SetEnabled(true)` (`0x7AC1BE`).
+- **Enabled vs disabled in Flash:** `SetEnabled(true)` = `gotoAndPlay("_up")`,
+  `SetEnabled(false)` = `gotoAndPlay("_disabled")`. Frame `_up` **removes**
+  `bg`, `disabledImage`, `frame` (depths 3/15/19) and **places new** `bg`,
+  `image` (RenderImage) and `frame` clips; `_disabled` does the reverse. So
+  every tile whose enabled state flips rebuilds its picture from new clips.
+  Tiles that stay locked (Tech Center) never change frame.
+- **Why our trace missed it:** the gadget setters go through
+  `FUN_00784E58` → `FUN_00416693` → `FUN_00412E96` (`_levelN.path.name`) →
+  `FUN_008CCF9A`, which pushes the arguments and **runs the ActionScript
+  function immediately** (not one of the five queued call variants we
+  traced). So the frame jump happens in whatever client frame the C++
+  refresh runs, while the new clips are only filled in on Flash's ~30 Hz
+  tick. Leading hypothesis: at 30 FPS a Flash tick follows in the same frame;
+  at 155 FPS the rebuilt tiles are drawn empty until the next tick.
+
+**Fix `button_enable_tick` (implemented 2026-10-12, needs a test):**
+- An entry hook on the bool direct-call helper (TW 1.10 `0x784E58`, cdecl
+  `(path, name, &bool)`, first instruction `MOV EDX,[g_aptPlayer]`, 6 bytes
+  replaced by `JMP` + NOP and replayed in the stub). When `name` is the
+  `"SetEnabled"` literal (pointer compare), it requests the engine's forced
+  Flash tick (`AptPlayer+0x1E9`, run before drawing, as in B1), so the
+  rebuilt tile is filled in before the frame is shown.
+- Covers every gadget that sends SetEnabled through it: build tiles
+  (`StandardCommandButton`), selection-refinement buttons and player-power
+  buttons. Senders only call it when the state changes, so the forced tick
+  is rare (a click/cancel or a production change); per-frame setters such as
+  SetTimerValue use other names and never force a tick.
+- Resolver: the unique SetEnabled sender (`55 8B EC 51 8A 41 ?? C0 E8 02 24
+  01 ... 68 <str> 51 E8`, chosen by its pushed string reading
+  `SetEnabled`; the same shape also sends SetVisibility), its call target
+  must match the helper pattern and load the already-resolved AptPlayer
+  pointer. TW 1.10 helper RVA `0x384E58`, TW 1.9 `0x5A7CEE`, KW 1.03
+  `0x521BD9`, KW 1.02 `0x56C5ED` (KW's sender reads the flag at +0x50).
+- Bisect name: `button_enable_tick`.
 
 **Earlier design options (for the ruled-out hypothesis):**
 - Batches 1–3 | 4–6 only when logic is light (cheap there), spreading when

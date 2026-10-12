@@ -41,9 +41,9 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | B18 | No micro-stutter on smoothly moving units (aircraft) at rates that aren't multiples of 15 (e.g. 155) | Implemented 2026-10-12, **needs in-game test** |
 | B21 | Turrets (all TurretAI vehicles and base defences) must not shake while moving | **Done** (`turret_fraction`, confirmed 2026-10-12) |
 | B22 | Turrets should pitch (aim up/down) smoothly, like they already turn | **Done** (`turret_pitch`, vanilla bug, confirmed 2026-10-12) |
-| B23 | Barrel recoil (Juggernaut, Mammoth, every `WeaponRecoilBone`) must play at retail speed | Fix `recoil_rate` implemented 2026-10-12, **needs in-game test** |
+| B23 | Barrel recoil (Juggernaut, Mammoth, every `WeaponRecoilBone`) must play at retail speed | **Done** (`recoil_rate`, confirmed 2026-10-12) |
 | B19 | Newly produced aircraft (Firestorm airfield) must not show in the air for one frame | **Done** (`teleport_snap`: teleports snap instead of sliding; confirmed 2026-10-12, teleporting units fine) |
-| B20 | Build menu icons must not vanish for one frame after clicking a build button | **Diagnosing**: game behaviour at high FPS (bisect); the OnInitialized UI tick didn't help and was removed; per-frame UI trace (`debug_apt_calls=2`) |
+| B20 | Build menu icons must not vanish for one frame after clicking a build button | Cause found (tiles rebuild their clips on SetEnabled, filled only on the ~30 Hz Flash tick); fix `button_enable_tick` implemented 2026-10-12, **needs in-game test** |
 
 ## Groundwork needed first
 

@@ -155,6 +155,7 @@ static int check(const char *path) {
         { "history_refresh", resolve_history_refresh_sites },
         { "turret_fraction", resolve_turret_fraction_sites },
         { "recoil", resolve_recoil_sites },
+        { "button_enable", resolve_button_enable_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -257,6 +258,8 @@ static int check(const char *path) {
         printf("  turret fraction load 0x%X, pitch site 0x%X\n", full.turret_fraction.engine_load,
                full.turret_fraction.pitch_site);
         printf("  recoil step site 0x%X\n", full.recoil.step_site);
+        printf("  SetEnabled helper 0x%X, string 0x%X\n", full.button_enable.helper,
+               full.button_enable.set_enabled_string);
         printf("  history refresh 0x%X (%s)\n", full.history_refresh.function,
                full.history_refresh.kane ? "KW, 2 args" : "TW, 1 arg");
         printf("  apt call variants %u: 0x%X 0x%X 0x%X 0x%X 0x%X\n", full.apt_calls.count,

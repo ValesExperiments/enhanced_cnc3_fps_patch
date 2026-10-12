@@ -2752,6 +2752,59 @@ static void install_recoil_rate(PatchInstaller *installer) {
     patch_bytes(installer, "weapon recoil rate", rva, expected, call, sizeof(call));
 }
 
+/*
+ * B20: SetEnabled moves a command button's clip between its "_disabled" and
+ * "_up" frames, which removes its background, icon and frame clips and
+ * places new ones. The game sends it through a direct call that runs the
+ * ActionScript at once, in whatever client frame the button's state flips
+ * (e.g. every other structure button when a Crane is queued or cancelled),
+ * but the new clips are only filled in on the ~30 Hz Flash tick. At 30 FPS a
+ * tick follows in the same frame; above it the buttons were drawn empty
+ * until the next tick. A SetEnabled now requests the engine's forced Flash
+ * tick before drawing (as B1). Senders only call it when the state changes.
+ */
+static const char *g_set_enabled_name;
+void *g_direct_call_apt_player;
+void *g_direct_call_resume;
+
+static void request_apt_tick(void);
+
+static void apt_direct_call_seen(const char *name) {
+    if (name == g_set_enabled_name) request_apt_tick();
+}
+
+/* Entry of the cdecl helper (path, name, &value): EAX/ECX/EDX are free. */
+__attribute__((naked)) static void apt_direct_call_entry(void) {
+    __asm__ volatile("pushl 8(%%esp)\n\t"
+                     "calll %c0\n\t"
+                     "addl $4, %%esp\n\t"
+                     "movl %c1, %%edx\n\t"
+                     "movl (%%edx), %%edx\n\t"
+                     "jmpl *%c2"
+                     :
+                     : "i"(apt_direct_call_seen), "i"(&g_direct_call_apt_player),
+                       "i"(&g_direct_call_resume));
+}
+
+static void install_button_enable_tick(PatchInstaller *installer) {
+    const ButtonEnableLayout *button = &g_game->button_enable;
+    u8 expected[6];
+    u8 jump[6] = { 0xE9, 0, 0, 0, 0, 0x90 };
+
+    memcpy(expected, game_address(g_game, button->helper), sizeof(expected));
+    if (expected[0] != 0x8B || expected[1] != 0x15) {
+        installer->ok = FALSE;
+        return;
+    }
+    g_set_enabled_name = (const char *)game_address(g_game, button->set_enabled_string);
+    g_direct_call_apt_player = game_address(g_game, g_game->objective_ui.apt_player_pointer);
+    g_direct_call_resume = game_address(g_game, button->helper + sizeof(expected));
+    encode_rel32(&jump[1], game_address(g_game, button->helper + 5u),
+                 (const void *)apt_direct_call_entry);
+    patch_bytes(installer, "APT direct call (SetEnabled tick)", button->helper, expected, jump,
+                sizeof(jump));
+}
+
 static void install_apt_call_counter(PatchInstaller *installer) {
     static const u8 prologue[6] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20 };
     static void (*const stubs[APT_CALL_FUNCTIONS])(void) = {
@@ -4605,6 +4658,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     INSTALL_FEATURE(turret_fraction);
     INSTALL_FEATURE(turret_pitch);
     INSTALL_FEATURE(recoil_rate);
+    INSTALL_FEATURE(button_enable_tick);
     INSTALL_FEATURE(drawable_interpolation_window);
     INSTALL_FEATURE(particle_and_cursor_timing);
     INSTALL_FEATURE(phase_scheduler);

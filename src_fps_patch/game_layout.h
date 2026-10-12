@@ -96,6 +96,18 @@ typedef struct TurretFractionLayout {
     u32 pitch_site;
 } TurretFractionLayout;
 
+typedef struct ButtonEnableLayout {
+    /*
+     * B20: gadgets push SetEnabled to their Flash clip through a direct call
+     * helper (TW 1.10 VA 0x784E58, cdecl(path, name, &bool), first
+     * instruction MOV EDX,[g_aptPlayer]) that runs the ActionScript function
+     * immediately. RVAs of that helper and of the "SetEnabled" literal every
+     * caller pushes.
+     */
+    u32 helper;
+    u32 set_enabled_string;
+} ButtonEnableLayout;
+
 typedef struct RecoilLayout {
     /*
      * B23: W3D draw's client recoil handler (TW 1.10 VA 0x863B46) steps
@@ -515,6 +527,7 @@ typedef struct GameLayout {
     HistoryRefreshLayout history_refresh;
     TurretFractionLayout turret_fraction;
     RecoilLayout recoil;
+    ButtonEnableLayout button_enable;
 } GameLayout;
 
 typedef enum GameResolveResult {

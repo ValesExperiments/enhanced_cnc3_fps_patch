@@ -303,6 +303,17 @@ Fix or remove anything that turns out to be wrong.
   in one run).
 - Branch scans: a function's callers can include tail `JMP`s (E9), not only
   `CALL`s (E8). Ghidra reports both as calls.
+- **Reading C&C3 Flash UI (B20, 2026-10-12):** the movies are stream assets
+  `data\aptui\<name>.bin` in `Core/1.0/Apt.big` (patches in `Core/1.9/
+  patch9.big` as `<name>_9`). Extract with `temp/firestorm/big_list.py` +
+  `big_extract.py`, decompress with `temp/b20_ui/refpack.py`, disassemble with
+  `temp/b20_ui/aptdis.py` (frames, place-object clip events, functions,
+  local constant pools resolved). Opcode table and layouts from OpenSAGE
+  (`src/OpenSage.Game/Gui/Apt/ActionScript/Opcodes/Instruction.cs`,
+  `Data/Apt/...`). Apt pointers are relative to the "Apt Data" header.
+  **C++ → Flash has a direct channel** besides the queued calls/variables:
+  `FUN_00784E58`/`FUN_00416693` → `FUN_008CCF9A` runs an ActionScript
+  function immediately (gadget setters such as SetEnabled use it).
 - **Finding a module's code without strings (B23, 2026-10-12):** C&C3 loads
   binary assets, so XML field names (`RecoilDamping`, ...) are not in the exe.
   Get the field names/defaults from `tools_and_docs_by_user/CnC_Modding_Support/

@@ -2042,6 +2042,76 @@ static const u16 g_turret_pitch_pattern[] = {
 };
 enum { TURRET_PITCH_SITE_OFFSET = 0x6A };
 
+/*
+ * A gadget's SetEnabled sender: flag byte -> stack, PUSH "SetEnabled",
+ * PUSH path, CALL helper. The same shape also sends SetVisibility, so the
+ * match is chosen by its string.
+ */
+static const u16 g_enable_sender_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x51, 0x8A, 0x41, PATTERN_ANY, 0xC0, 0xE8, 0x02, 0x24, 0x01, 0x88, 0x45,
+    0xFF, 0x8D, 0x45, 0xFF, 0x50, 0x83, 0xC1, 0x08, 0x68, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    PATTERN_ANY, 0x51, 0xE8
+};
+enum { ENABLE_SENDER_STRING = 0x17, ENABLE_SENDER_CALL = 0x1C };
+/* The bool direct-call helper: MOV EDX,[g_aptPlayer]; ...; CALL; ADD ESP,0x14; RET. */
+static const u16 g_direct_call_helper_pattern[] = {
+    0x8B, 0x15, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x85, 0xD2, 0x74, 0x24,
+    0x8B, 0x44, 0x24, 0x04, 0x8B, 0x48, 0x04, 0x85, 0xC9, 0x75, 0x05, 0xB9, PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xFF, 0x74, 0x24, 0x0C, 0xFF, 0x74, 0x24, 0x0C, 0x51,
+    0xFF, 0x30, 0x52, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x83, 0xC4,
+    0x14, 0xC3
+};
+
+static BOOL resolve_button_enable_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    static const char name[] = "SetEnabled";
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u32 image_size = game->pe_size_of_image;
+    u32 sender = 0;
+    u32 string_rva = 0;
+    u32 helper;
+    u32 apt_player;
+    u32 matches = 0;
+    u16 section_index;
+
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections;
+         ++section_index, ++section) {
+        u32 start = section->VirtualAddress;
+        u32 size = section->Misc.VirtualSize;
+        u32 offset;
+        u32 candidate;
+
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 || start >= image_size ||
+            size > image_size - start || size < ARRAY_COUNT(g_enable_sender_pattern)) {
+            continue;
+        }
+        for (offset = 0; offset <= size - ARRAY_COUNT(g_enable_sender_pattern); ++offset) {
+            if (!pattern_matches(module + start + offset, g_enable_sender_pattern,
+                                 ARRAY_COUNT(g_enable_sender_pattern)) ||
+                !read_absolute_rva(module, image_size, start + offset + ENABLE_SENDER_STRING,
+                                   &candidate) ||
+                candidate > image_size - sizeof(name) ||
+                memcmp(module + candidate, name, sizeof(name)) != 0) {
+                continue;
+            }
+            sender = start + offset;
+            string_rva = candidate;
+            ++matches;
+        }
+    }
+    if (matches != 1 ||
+        !decode_relative_target(module, image_size, sender + ENABLE_SENDER_CALL, 0xE8, &helper) ||
+        helper > image_size - ARRAY_COUNT(g_direct_call_helper_pattern) ||
+        !pattern_matches(module + helper, g_direct_call_helper_pattern,
+                         ARRAY_COUNT(g_direct_call_helper_pattern)) ||
+        !read_absolute_rva(module, image_size, helper + 2u, &apt_player) ||
+        apt_player != game->objective_ui.apt_player_pointer) {
+        return FALSE;
+    }
+    game->button_enable.helper = helper;
+    game->button_enable.set_enabled_string = string_rva;
+    return TRUE;
+}
+
 /* The recoil state switch (identical in all four builds). */
 static const u16 g_recoil_step_pattern[] = {
     0x8B, 0x46, 0x14, 0x3B, 0xC1, 0x7E, 0x7D, 0x83, 0xF8, 0x02, 0x7E, 0x29, 0x83, 0xF8, 0x03,
@@ -2453,6 +2523,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_history_refresh_sites(module, nt, &game) ||
         !resolve_turret_fraction_sites(module, nt, &game) ||
         !resolve_recoil_sites(module, nt, &game) ||
+        !resolve_button_enable_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||
