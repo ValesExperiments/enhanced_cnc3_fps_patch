@@ -27,12 +27,20 @@ Fix or remove anything that turns out to be wrong.
   layout_check were updated). `src_multicore/` is the new multi-core
   project, still research only: see `docs/multicore.md` and
   `docs/multicore_detailed.md`. The user's recent test logs come from
-  **TW 1.9**, which is *not* Large Address Aware (TW 1.10 and KW are).
+  **TW 1.9**. The user made it Large Address Aware with the 4 GB patcher on
+  2026-10-12 (only the LAA flag and the checksum changed; the patch still resolves).
 - **Profiler (2026-10-12):** `profiler=1` makes the DLL write
   `fps_profile.log` (src_multicore/profiler.c). Turn RVAs into names with
   `tools_and_docs_by_claude/profiler_report/analyze.py --map
-  maps/functions_<build>.tsv`. Maps exist for TW 1.10 and KW 1.03 only;
-  ask for TW 1.10 profiling runs (TW 1.9 isn't in Ghidra).
+  maps/functions_<build>.tsv`. Maps exist for all four builds;
+  TW 1.9 and KW 1.02 are imported into a *second* Ghidra project
+  (`CnC3_extra.gpr`, `ghidra_tools/import_extra.py`, which also writes their
+  maps), because the MCP server holds `CnC3.gpr`. To read those builds, run
+  `ghidra_tools/decompile_extra.py <program> <hex addresses...>` (callers,
+  vtables, strings, decompiled C).
+- **The user's requirement:** the multi-core work must run on TW 1.10, TW 1.9
+  *and* Kane's Wrath. The user plays heavy modded games on TW 1.9; 1.10 is
+  vanilla and lighter.
 - `sed -i` in Git Bash rewrites CRLF files as LF. Restore CRLF afterwards,
   or edit with Python in binary mode.
 

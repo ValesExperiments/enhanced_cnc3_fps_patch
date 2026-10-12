@@ -1116,7 +1116,8 @@ static void THISCALL tracer_manager_update_every_frame(void *manager) {
     frame = get_retail_visual_frame(game_client);
     if (frame != *(u32 *)((u8 *)manager + TRACER_MANAGER_LAST_FRAME)) {
         g_original_tracer_manager_update(manager);
-    } else {
+    } else if (particles_simulate()) {
+        /* Like particles, tracers hold still while the game is paused. */
         g_tracer_movement_pass(manager, frame);
     }
 }
@@ -2916,8 +2917,9 @@ static u32 g_pacing_ceiling;
 static u32 g_pacing_ceiling_frames;
 static u32 g_pacing_retry_ms = CEILING_RETRY_MS;
 static u32 g_pacing_previous_call_ms;
-/* Lasting ceiling below an outside frame limit (driver cap, GPU); 0 = none. */
+/* Ceiling below an outside frame limit (driver cap, GPU) this session; 0 = none. */
 static u32 g_pacing_outside_ceiling;
+enum { OUTSIDE_LIMIT_MIN_FPS = 60 };
 /* The rate and per-frame drawing time before the last drop. */
 static u32 g_pacing_drop_from;
 static double g_pacing_drop_drawing;
@@ -3098,10 +3100,12 @@ static void monitor_frame_pacing(u32 interval_ms) {
     /*
      * First judgement after a drop: if the old rate's per-frame time was far
      * above this one's, the old rate waited on something outside the game
-     * (a driver frame cap, or the GPU). Stay 4% below it from now on.
+     * (a driver frame cap, or the GPU). Stay 4% below it for the session.
+     * Only high rates are judged: at low rates a heavy battle's per-frame
+     * time swings by itself (it once pinned the rate at 7 FPS).
      */
     if (g_pacing_drop_from != 0u) {
-        if (g_rate < g_pacing_drop_from &&
+        if (g_rate < g_pacing_drop_from && g_pacing_drop_from >= OUTSIDE_LIMIT_MIN_FPS &&
             g_pacing_drop_drawing > 1.3 * drawing + 0.5) {
             u32 ceiling = supported_rate_at_most((double)g_pacing_drop_from * 0.96);
             if (ceiling >= g_rate &&
@@ -3668,10 +3672,8 @@ void game_patches_reset_state(void) {
     if (g_config != NULL) {
         /* Each session starts at the configured rate; pacing lowers it if needed. */
         g_rate = g_config->target_fps;
-        if (g_pacing_outside_ceiling != 0u && g_pacing_outside_ceiling < g_rate) {
-            g_rate = g_pacing_outside_ceiling;
-        }
         g_rate_pending = g_rate;
+        g_pacing_outside_ceiling = 0;
         reset_pacing_monitor();
         g_retail_started = FALSE;
         g_catch_up_accumulator = 0u;

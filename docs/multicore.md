@@ -6,9 +6,27 @@ lows by using more CPU cores. Details and sources are in
 
 ## Where we stand (2026-10-12)
 
-**Research done; the profiler (option 1) is built and waiting for a test
-battle.** Code lives in `src_multicore/`. Turn it on with `profiler=1` in
-`fps_patch.ini`; it writes `fps_profile.log`.
+**Research done; profiler built; first profile taken (TW 1.10, a lighter
+match).** Code lives in `src_multicore/`. Turn it on with `profiler=1` in
+`fps_patch.ini`; it writes `fps_profile.log`. Everything must work on TW
+1.10, TW 1.9 and Kane's Wrath. Function maps exist for all four builds
+(TW 1.10/1.9, KW 1.03/1.02), so any of their profiles can be read.
+
+First profile, busiest minutes:
+- The main thread used a full core; all other threads were nearly idle.
+- Drawing took ~64% of it, game logic ~30% and particle/audio updates ~6%.
+- The biggest single item is the trail renderer (~7%). The game's memory
+  allocator, D3DX matrix math and particle drawing follow; game logic is
+  spread thin.
+- Heavy 7-AI battle on modded TW 1.9 (3–6 FPS): **game logic was 64–75%**
+  of the main thread and needed up to ~1.1 s of CPU per game second, so the
+  game ran at 56–70% speed. Biggest single items:
+  - drawing trails ~11%;
+  - adding new particle effects to the manager's list ~8% (it searches the
+    whole list each time);
+  - "find objects near me" range searches ~10%.
+- Both directions pay off: logic on its own core (biggest win in heavy
+  battles) and specific speed-ups that keep results identical.
 
 ## What we know
 

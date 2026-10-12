@@ -601,6 +601,15 @@ velocity 5–10/step).
   left, they collapse (vanilla shows nothing then). A live sighting resets
   the entry (pool reuse); the table is cleared per session.
 
+### Bug: bullets kept moving while paused (fixed 2026-10-12, needs a test)
+`W3DTracerManager_Update` (TW 0x834270) has no pause check. It moves tracers
+only when the (now 30 Hz synthetic) client frame changes, and that frame
+stops while paused. On the frames in between, `tracer_manager_update_every_frame`
+called the movement pass (0x832B39) unconditionally, so tracers kept flying
+during a pause. The in-between pass now runs only when `particles_simulate()`
+(client simulating and logic not paused), the same gate the CPU particles
+use.
+
 ### Not covered yet
 30 Hz emission batching of continuous streams (all types, including GPU
 particles).
@@ -1213,6 +1222,16 @@ per frame. Frames that take longer than 1/target therefore slow everything.
     87–94%: nothing could hold 100% (a fixed 30 FPS ≈ 45%, 15 FPS ≈ 64%).
     Open option: an `adaptive_min_fps` setting if the user prefers
     smoothness over speed in such battles.
+- **Round 8 (2026-10-12): bug, the rate stuck at 7 FPS after a match.**
+  - In a heavy TW 1.9 battle the outside-limit check misfired at low rates:
+    "15 FPS took 15.17 ms/frame against 10.42 here … at or below 14", then
+    "… at or below 7". In a big battle the per-frame time swings by itself.
+  - The ceiling was kept across sessions, and sessions started at it, so the
+    menu after the match stayed at 7 FPS.
+  - Fix: the check only judges drops from 60 FPS or more
+    (`OUTSIDE_LIMIT_MIN_FPS`), and the ceiling is cleared at every session
+    start. A real driver cap is then found again within seconds of each
+    match start.
 - **Supported rates:** the target; above 90 any rate; 15–90 multiples of 15
   (the stock schedule needs whole frames per tick); below 15 any whole number,
   down to 5.

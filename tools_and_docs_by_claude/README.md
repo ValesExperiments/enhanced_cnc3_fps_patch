@@ -10,7 +10,7 @@ folder; nothing is installed system-wide.
 | `make/` | no | GNU make 4.4.1 (ezwinports build) |
 | `venv/` | no | Python 3.14 venv: JPype 1.7.1, PyGhidra 3.1.0, MCP SDK, meson, ninja |
 | `layout_check/` | yes | Offline check that the patch resolves all its hook sites in a given game executable |
-| `profiler_report/` | yes | `analyze.py` summarises `fps_profile.log` (the src_multicore profiler) per function; `maps/` holds Ghidra function lists for TW 1.10 and KW 1.03 |
+| `profiler_report/` | yes | `analyze.py` summarises `fps_profile.log` (the src_multicore profiler) per function; `maps/` holds Ghidra function lists for TW 1.10, TW 1.9, KW 1.03 and KW 1.02 |
 | `sigscan/` | yes | Python helper to prototype byte signatures on all four builds at once (`venv/Scripts/python.exe sigscan/sigscan.py my_script.py`; the script gets `find`, `calls_to`, `hexdump` and `BUILDS`) |
 | `ghidra_tools/` | yes | Headless Ghidra helpers and the Ghidra MCP server |
 | `dxvk_cursorlock/` | partly | DXVK 3.1.1 `d3d9.dll` with a fullscreen cursor lock: patch, build script, README (source copy and output are gitignored) |

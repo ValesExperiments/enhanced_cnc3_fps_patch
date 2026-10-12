@@ -25,6 +25,87 @@ From `fps_patch.log` adaptive-pacing status lines, TW 1.9, 7 AIs, late game:
 - If logic ran on another core, the main thread would only need effects +
   drawing: ~20–25 FPS in that same battle, at 100% speed.
 
+## 1b. First profile (2026-10-12, TW 1.10, ~11 min skirmish, lighter than the 1.9 marathon)
+
+`temp/profile1/` holds the logs. Analysis: `analyze.py --windows 3-6` (the
+busiest part, minutes 3–7, 45–110 FPS, logic peaking ~400 ms/s).
+
+- **Threads:** the main thread used **97.7% of a core**. Everything else was
+  nearly idle: DXVK's 4 worker threads ~12% in total, DSOUND/wdmaud audio
+  <1%, a MSVCR80 worker 3.6%, the Steam overlay 1.3%, our sampler 1.6%. So
+  the game really is one thread.
+- **Zones** of the main thread: client 64%, logic 30%, effects 6%. With
+  adaptive pacing the client share is "whatever is left", since the rate
+  rises until the core is full.
+- **Outside the game image:**
+  - ntdll 13.4%, of which ~8% is idle waiting in the main loop's limiter
+    (call site `0x55D9C3`); the rest is heap and lock functions;
+  - D3D9 (DXVK) 4.6%;
+  - d3dx9_29 4.4% (D3DX matrix math, e.g. `0x731C57` inverts a matrix per
+    call);
+  - our DLL (`DINPUT8`) 2.6%;
+  - win32u 0.9%, MSVCR80 0.9%.
+- **Inclusive (upper bound):**
+  - GameEngine::update 86%; GameClient_update 52%;
+  - W3DDisplay::draw (`0x83BE2D`, vtable slot 12) 47% → `0x839FB3` 36% →
+    RTS3DScene render (`0x832120`) 32%;
+  - logic (`GameLogic_UpdatePhase`) 27%;
+  - W3DParticleSystemManager render (`0x80FDDE`) 14%;
+  - TrailDrawModule_Draw 7.7%, of which the trail vertex builder `0x5BA171`
+    is **7.0% exclusive**, the single hottest function;
+  - the game's small-block allocator `0x91B136` (size classes, guarded by a
+    critical section, `0x91771D`) 16.8%, `_Free` 9.4%, operator delete
+    (`0x402954`) 7.9%.
+- **Logic** is spread thin: no function above 0.8% exclusive. There is no
+  single dominant hot spot like Generals' pathfinding.
+- **Our trail fix (B3) is not the cost:** it moves existing points and adds
+  at most one. The trail vertex builder runs every frame in vanilla too.
+
+**What it means:**
+- Drawing is the larger cost per second in this match. Moving logic to
+  another core would have freed ~30% of the main thread here, and more in
+  heavier battles (60–90% of a second of logic in the 1.9 7-AI marathon).
+- Client-side candidates: the trail vertex builder (7%), the allocator (lock
+  per call; several %), D3DX matrix inversions (~4%), particle rendering
+  (14% inclusive).
+- A profile of a heavy TW 1.9 battle is still needed. Function maps for
+  TW 1.9 and KW 1.02 were produced by `ghidra_tools/import_extra.py`
+  (separate project `CnC3_extra`; ~6 min of auto-analysis each).
+
+## 1c. Heavy profile (2026-10-12, TW 1.9 modded, 7 AIs, ~7 min)
+
+`temp/profile2/`. Windows 4–6 (minutes 4–7): 3.7–5.8 FPS. Logic went up to
+900–1100 ms per game second, so the game ran at 56–70% speed even at 6 FPS.
+
+- **Zones:** logic **64–75%** of the main thread, client 16–25%, effects
+  8–11%. Outside the game image: ntdll 4.9%, MSVCR80 1.5%, D3D9/d3dx9 0.8%
+  each, our DLL 0.4%.
+- **Hot spots (exclusive, share of all samples)**, TW 1.9 VAs:
+  - `0x7592CB` **10.6%** (client): the TrailDrawModule vertex builder
+    (called from the TrailDrawModule vtable slot 7, `0x75A5E1`). The same
+    function as 1.10's `0x5BA171`.
+  - `0x7573FC` **≈8.5%** (7.3% logic): inserting a new particle system into
+    the particle manager's list. It walks the whole linked list for the first
+    system with the same key (+0x15C) and inserts before it (`0x756969`).
+    Called from particle-system creation `0x75D5CA` (8+ callers in logic/FX
+    code). With thousands of live systems this is O(n) per creation.
+  - `0x98E360` (recursive spatial tree walk) + `0x98E129` / `0x98E1CE`
+    (2D / 3D circle-overlap distances) **≈9.6%** (logic): object range
+    queries (weapons, AI scans).
+  - `0x75E74F` 3.4% (effects).
+  - `_Allocate` is on the stack in up to 32% of samples (upper bound).
+- **What it means:**
+  - Moving logic to its own core would free ~70% of the main thread here
+    (drawing would reach roughly 3× the frame rate). The logic core would
+    also get a whole core instead of ~70% of one, raising game speed from
+    ~56% towards ~80% in the worst minutes.
+  - Pure speed-ups with identical results:
+    - an O(1) index for the particle list insert (~8%);
+    - a cheaper trail vertex builder or moving it off the main thread
+      (~10%);
+    - faster range queries (~10%, but it is logic, so results must stay
+      bit-identical).
+
 ## 2. Threads the game creates (static analysis)
 
 | Creator | Thread |
