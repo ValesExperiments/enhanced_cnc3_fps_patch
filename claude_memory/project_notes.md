@@ -22,6 +22,14 @@ Fix or remove anything that turns out to be wrong.
   folders. It has no frame generation and is currently off.
 - The user wants Kane's Wrath to keep working. KW differs only slightly from
   TW.
+- **Source layout (since 2026-10-12):** the FPS patch lives in
+  `src_fps_patch/` (renamed from `src/`; Makefile, CI workflow and
+  layout_check were updated). `src_multicore/` is the new multi-core
+  project, still research only: see `docs/multicore.md` and
+  `docs/multicore_detailed.md`. The user's recent test logs come from
+  **TW 1.9**, which is *not* Large Address Aware (TW 1.10 and KW are).
+- `sed -i` in Git Bash rewrites CRLF files as LF. Restore CRLF afterwards,
+  or edit with Python in binary mode.
 
 ## Git
 - `origin` is the user's fork: `ValesExperiments/enhanced_cnc3_fps_patch`.
@@ -125,7 +133,7 @@ Fix or remove anything that turns out to be wrong.
   default on) instead of DISALLOWED. G-Sync then works borderless with
   windowed G-Sync off (the user keeps it off because a 60 Hz second monitor
   breaks it).
-- **Patch-write budget:** `PATCH_TRANSACTION_CAPACITY` (src/memory_patch.h)
+- **Patch-write budget:** `PATCH_TRANSACTION_CAPACITY` (src_fps_patch/memory_patch.h)
   limits how many static writes one install may make (raised from 32 to 64
   on 2026-10-11, when 33 writes silently pushed the game back to 30 FPS).
   layout_check only tests signature resolution, not the install step, so
@@ -265,8 +273,8 @@ Fix or remove anything that turns out to be wrong.
   constants (`x^(30/target)`), a synthetic 30 Hz frame counter, 30 Hz
   Bresenham gating, or corrected time caches. Details are in
   `docs/implementation.md`.
-- All patch sites are found by signature scanning (`src/game_layout.c`), then
-  checked again before writing (`src/game_patches.c`), with transactional
+- All patch sites are found by signature scanning (`src_fps_patch/game_layout.c`), then
+  checked again before writing (`src_fps_patch/game_patches.c`), with transactional
   rollback.
 
 ## Docs layout

@@ -3,17 +3,17 @@ PYTHON ?= python3
 TARGET := x86-windows-gnu
 
 SOURCES := \
-	src/common.c \
-	src/game_layout.c \
-	src/game_patches.c \
-	src/memory_patch.c \
-	src/config.c \
-	src/log.c \
-	src/runtime.c \
-	src/proxy_dinput8.c \
-	src/dllmain.c
+	src_fps_patch/common.c \
+	src_fps_patch/game_layout.c \
+	src_fps_patch/game_patches.c \
+	src_fps_patch/memory_patch.c \
+	src_fps_patch/config.c \
+	src_fps_patch/log.c \
+	src_fps_patch/runtime.c \
+	src_fps_patch/proxy_dinput8.c \
+	src_fps_patch/dllmain.c
 
-HEADERS := $(wildcard src/*.h)
+HEADERS := $(wildcard src_fps_patch/*.h)
 
 COMMON_CFLAGS := \
 	-target $(TARGET) \
@@ -21,7 +21,7 @@ COMMON_CFLAGS := \
 	-Wall \
 	-Wextra \
 	-Werror \
-	-Isrc
+	-Isrc_fps_patch
 
 COMMON_LDFLAGS := \
 	-target $(TARGET) \
@@ -36,7 +36,7 @@ MODE ?= release
 OBJDIR := zig-out/obj/$(MODE)
 BINDIR := zig-out/bin
 LIBDIR := zig-out/lib
-OBJECTS := $(patsubst src/%.c,$(OBJDIR)/%.obj,$(SOURCES))
+OBJECTS := $(patsubst src_fps_patch/%.c,$(OBJDIR)/%.obj,$(SOURCES))
 
 ifeq ($(MODE),debug)
   CFLAGS := $(COMMON_CFLAGS) -O0 -g
@@ -67,13 +67,13 @@ build: $(OUTPUT) $(BINDIR)/fps_patch.ini
 $(BINDIR)/fps_patch.ini: fps_patch.ini.example | $(BINDIR)
 	cp $< $@
 
-$(OUTPUT): $(OBJECTS) src/dinput8.def $(LINK_DEPS) | $(BINDIR) $(LIBDIR)
+$(OUTPUT): $(OBJECTS) src_fps_patch/dinput8.def $(LINK_DEPS) | $(BINDIR) $(LIBDIR)
 	$(LINK) $(LDFLAGS) \
 		-Wl,/implib:$(LIBDIR)/dinput8-$(MODE).lib \
 		-Wl,/pdb:$(LIBDIR)/dinput8-$(MODE).pdb \
-		$(OBJECTS) src/dinput8.def -lkernel32 -lwinmm -o $@
+		$(OBJECTS) src_fps_patch/dinput8.def -lkernel32 -lwinmm -o $@
 
-$(OBJDIR)/%.obj: src/%.c $(HEADERS) | $(OBJDIR)
+$(OBJDIR)/%.obj: src_fps_patch/%.c $(HEADERS) | $(OBJDIR)
 	$(ZIG) cc $(CFLAGS) -c $< -o $@
 
 $(OBJDIR) $(BINDIR) $(LIBDIR):

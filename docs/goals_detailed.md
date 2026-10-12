@@ -21,7 +21,7 @@ Last updated: 2026-10-11 (B1, B2, B4 fixed; B5 diagnosed; B6 fix implemented).
   `R = targetFPS / 15` (3..6).
 - Between logic ticks, Drawables are placed using a **phase interpolation
   float** written by `GameEngine_UpdatePhaseInterpolation` (hooked:
-  `update_phase_interpolation` in [game_patches.c](../src/game_patches.c)).
+  `update_phase_interpolation` in [game_patches.c](../src_fps_patch/game_patches.c)).
 - Many subsystems were authored per client frame without a time step. The
   patch handles them one by one, in four ways:
   - **Rescaling constants** with `30/target` or `x^(30/target)`: camera scroll,
@@ -1296,7 +1296,7 @@ that saves EAX/ECX/EDX and XMM2–XMM7 around the C function.
   adaptation; the schedule keeps phase 1 to one frame, but MP is untested.
 
 ### Blockers found in the current code
-1. **Config validation** ([config.c](../src/config.c)): only 45–90 in steps of
+1. **Config validation** ([config.c](../src_fps_patch/config.c)): only 45–90 in steps of
    15 are accepted.
 2. **6-phase scheduler.** `get_phase_batch_limit`, `update_phase_interpolation`
    and `is_client_slice_end` assume `R ≤ 6`, i.e. every client frame

@@ -13,7 +13,7 @@
  * as IMAGE_NT_HEADERS32 and RVAs, so it behaves identically while the image
  * stays below 4 GB.
  *
- * src/common.h refuses non-x86 builds, so its few definitions that the
+ * src_fps_patch/common.h refuses non-x86 builds, so its few definitions that the
  * resolver needs are supplied here, and the resolver source is included
  * directly so its static stage functions can be called one at a time.
  *
@@ -41,7 +41,7 @@ u32 load_u32(const void *address) {
     return value;
 }
 
-#include "../../src/game_layout.c"
+#include "../../src_fps_patch/game_layout.c"
 
 #define PREFERRED_BASE 0x00400000u
 
