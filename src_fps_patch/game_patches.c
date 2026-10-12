@@ -2113,6 +2113,490 @@ static u8 THISCALL update_audio_at_retail_rate(void *audio_manager) {
  * clip was drawn unpositioned for one or more client frames. Requesting the
  * engine's own forced APT tick makes the callback run before that draw.
  */
+/*
+ * Diagnostic (debug_apt_calls=1): count queued ActionScript calls (the five
+ * variants) per call site and log the busiest once per second.
+ */
+enum { APT_CALL_SLOTS = 256, APT_CALL_TOP = 8 };
+
+typedef struct AptCallCount {
+    u32 caller;
+    u32 variant;
+    u32 count;
+} AptCallCount;
+
+static AptCallCount g_apt_call_counts[APT_CALL_SLOTS];
+static u32 g_apt_call_total;
+static u32 g_apt_call_window_start;
+void *g_apt_call_resume[APT_CALL_FUNCTIONS];
+
+static int compare_apt_calls(const void *a, const void *b) {
+    const AptCallCount *left = (const AptCallCount *)a;
+    const AptCallCount *right = (const AptCallCount *)b;
+    return left->count < right->count ? 1 : left->count > right->count ? -1 : 0;
+}
+
+static void report_apt_calls(u32 now) {
+    AptCallCount sorted[APT_CALL_SLOTS];
+    char line[512];
+    int used;
+    u32 count = 0;
+    u32 i;
+
+    for (i = 0; i < APT_CALL_SLOTS; ++i) {
+        if (g_apt_call_counts[i].count != 0u) sorted[count++] = g_apt_call_counts[i];
+    }
+    qsort(sorted, count, sizeof(AptCallCount), compare_apt_calls);
+    used = snprintf(line, sizeof(line), "APT calls [t=%u ms]: total %u |", now, g_apt_call_total);
+    for (i = 0; i < count && i < APT_CALL_TOP && used > 0 && (size_t)used < sizeof(line); ++i) {
+        used += snprintf(line + used, sizeof(line) - (size_t)used, " %u:0x%06X x%u",
+                         sorted[i].variant, sorted[i].caller, sorted[i].count);
+    }
+    log_line(line);
+    memset(g_apt_call_counts, 0, sizeof(g_apt_call_counts));
+    g_apt_call_total = 0;
+}
+
+static void apt_call_record(u32 variant, u32 return_address) {
+    u32 caller = return_address - (u32)(uintptr_t)g_game->module;
+    u32 slot = ((caller * 2654435761u) ^ variant) % APT_CALL_SLOTS;
+    u32 probes;
+    u32 now = timeGetTime();
+
+    for (probes = 0; probes < APT_CALL_SLOTS; ++probes) {
+        AptCallCount *entry = &g_apt_call_counts[slot];
+        if (entry->count == 0u || (entry->caller == caller && entry->variant == variant)) {
+            entry->caller = caller;
+            entry->variant = variant;
+            ++entry->count;
+            break;
+        }
+        slot = (slot + 1u) % APT_CALL_SLOTS;
+    }
+    ++g_apt_call_total;
+    if (now - g_apt_call_window_start >= 1000u) {
+        report_apt_calls(now);
+        g_apt_call_window_start = now;
+    }
+}
+
+/*
+ * Diagnostic (debug_apt_calls=2): one line per queued call (variants 0-4)
+ * and per variable set (5) from 10 s into a game, with the client frame,
+ * the call site and the name (second argument, printed when it points into
+ * the game image).
+ */
+enum { APT_TRACE_MAX_LINES = 20000 };
+static u32 g_apt_trace_lines;
+static u32 g_apt_trace_first_frame;
+static BOOL g_apt_trace_started;
+
+static void apt_call_trace(u32 variant, u32 return_address, u32 name) {
+    void *game_client;
+    u32 frame;
+    char text[64];
+    const u8 *module = g_game->module;
+    u32 i;
+
+    if (g_apt_trace_lines >= APT_TRACE_MAX_LINES) return;
+    game_client = *(void **)game_address(g_game, g_game->drawable_physics.game_client_pointer);
+    if (game_client == NULL) return;
+    frame = read_client_frame(game_client);
+    if (!g_apt_trace_started) {
+        g_apt_trace_started = TRUE;
+        g_apt_trace_first_frame = frame;
+    }
+    if (frame - g_apt_trace_first_frame < 10u * g_rate) return;
+    /* Per-frame noise: the selection panel's name and the money display. */
+    if (variant == 5u && name >= (u32)(uintptr_t)module &&
+        name < (u32)(uintptr_t)module + g_game->pe_size_of_image - 16u &&
+        (strcmp((const char *)(uintptr_t)name, "UnitName") == 0 ||
+         strcmp((const char *)(uintptr_t)name, "Resource") == 0)) {
+        return;
+    }
+    text[0] = '\0';
+    if (name >= (u32)(uintptr_t)module && name < (u32)(uintptr_t)module + g_game->pe_size_of_image - 64u) {
+        const char *s = (const char *)(uintptr_t)name;
+        for (i = 0; i + 1u < sizeof(text) && s[i] >= 0x20 && s[i] < 0x7F; ++i) text[i] = s[i];
+        text[i] = '\0';
+    }
+    log_printf("A f=%u t=%u v=%u c=0x%06X %s", frame, timeGetTime(), variant,
+               return_address - (u32)(uintptr_t)module, text[0] != '\0' ? text : "?");
+    if (++g_apt_trace_lines == APT_TRACE_MAX_LINES) log_line("APT trace: complete");
+}
+
+__attribute__((used)) static void apt_call_entry(u32 variant, u32 return_address, u32 name) {
+    if (g_config->debug_apt_calls == 1u) apt_call_record(variant, return_address);
+    if (g_config->debug_apt_calls == 2u) apt_call_trace(variant, return_address, name);
+}
+
+/* Entry stubs: note the call, replay PUSH EBP; MOV EBP,ESP; SUB ESP,0x20, resume at +6. */
+#define APT_CALL_STUB(n)                                                          \
+    __attribute__((naked)) static void apt_call_stub_##n(void) {                \
+        __asm__ volatile("pushal\n\t"                                          \
+                         "pushfl\n\t"                                          \
+                         "pushl 44(%%esp)\n\t"                                  \
+                         "pushl 40(%%esp)\n\t"                                  \
+                         "pushl $" #n "\n\t"                                    \
+                         "calll %c0\n\t"                                        \
+                         "addl $12, %%esp\n\t"                                  \
+                         "popfl\n\t"                                           \
+                         "popal\n\t"                                           \
+                         "pushl %%ebp\n\t"                                      \
+                         "movl %%esp, %%ebp\n\t"                                \
+                         "subl $0x20, %%esp\n\t"                                \
+                         "jmpl *%c1"                                            \
+                         :                                                      \
+                         : "i"(apt_call_entry), "i"(&g_apt_call_resume[n]));     \
+    }
+APT_CALL_STUB(0)
+APT_CALL_STUB(1)
+APT_CALL_STUB(2)
+APT_CALL_STUB(3)
+APT_CALL_STUB(4)
+
+/* Variable set (diagnostic): replays PUSH EBP; MOV EBP,ESP; SUB ESP,0x24. */
+void *g_apt_variable_resume;
+__attribute__((naked)) static void apt_variable_stub(void) {
+    __asm__ volatile("pushal\n\t"
+                     "pushfl\n\t"
+                     "pushl 44(%%esp)\n\t"
+                     "pushl 40(%%esp)\n\t"
+                     "pushl $5\n\t"
+                     "calll %c0\n\t"
+                     "addl $12, %%esp\n\t"
+                     "popfl\n\t"
+                     "popal\n\t"
+                     "pushl %%ebp\n\t"
+                     "movl %%esp, %%ebp\n\t"
+                     "subl $0x24, %%esp\n\t"
+                     "jmpl *%c1"
+                     :
+                     : "i"(apt_call_entry), "i"(&g_apt_variable_resume));
+}
+
+static void patch_bytes(PatchInstaller *installer, const char *name, u32 rva,
+                        const void *expected, const void *replacement, size_t size);
+
+/*
+ * Diagnostic (debug_spawn_frames > 0): every drawn object goes through
+ * Drawable::getInterpolatedTransform each frame. Drawables not seen during
+ * the previous second (new, or scrolled into view), from 10 s into a game,
+ * are followed for 30 frames: one S line per frame with the engine phase,
+ * interpolation s, the Object's position and the transform actually drawn
+ * (translation incl. height).
+ */
+enum { SPAWN_SEEN_SIZE = 8192, SPAWN_FOLLOW_MAX = 4, SPAWN_FOLLOW_FRAMES = 12 };
+
+typedef struct SpawnSeen {
+    const void *drawable;
+    u32 frame;
+} SpawnSeen;
+
+typedef struct SpawnFollow {
+    const void *drawable;
+    u32 id;
+    u32 frames;
+    u32 last_frame;
+} SpawnFollow;
+
+static SpawnSeen g_spawn_seen[SPAWN_SEEN_SIZE];
+static SpawnFollow g_spawn_follow[SPAWN_FOLLOW_MAX];
+static u32 g_spawn_lines;
+static u32 g_spawn_first_frame;
+static BOOL g_spawn_started;
+static u32 g_spawn_next_id;
+void *g_spawn_transform_resume;
+
+/* The function's first 10 bytes (PUSH ESI; MOV ESI,ECX; CMP [ESI+0x140],0), then the rest. */
+__attribute__((naked)) static void interpolated_transform_original(void) {
+    __asm__ volatile("pushl %%esi\n\t"
+                     "movl %%ecx, %%esi\n\t"
+                     "cmpl $0, 0x140(%%esi)\n\t"
+                     "jmpl *%c0"
+                     :
+                     : "i"(&g_spawn_transform_resume));
+}
+
+/*
+ * B19 detector: follow any drawable whose drawn height differs from its
+ * Object's height by more than 4 units (an aircraft drawn above its pad),
+ * from 10 s into a game, for 12 frames. TW offsets (same in 1.10 and 1.9):
+ * Object previous position +0x1A8 and its valid flag +0x1C1, the drawable's
+ * history pair +0xD0/+0xDC, flags +0x144..+0x147.
+ */
+static void log_spawn_transform(const u8 *drawable, const float *m) {
+    const u8 *object;
+    const u8 *engine;
+    const float *pos;
+    const float *prev;
+    const float *p1 = (const float *)(drawable + DRAWABLE_HISTORY_PREVIOUS);
+    const float *p2 = (const float *)(drawable + DRAWABLE_HISTORY_CURRENT);
+    void *game_client;
+    SpawnFollow *follow = NULL;
+    SpawnSeen *seen;
+    u32 frame;
+    u32 slot;
+    BOOL fresh;
+    float dz;
+    u32 i;
+
+    if (g_spawn_lines >= g_config->debug_spawn_frames || m == NULL) return;
+    game_client = *(void **)game_address(g_game, g_game->drawable_physics.game_client_pointer);
+    if (game_client == NULL) return;
+    frame = read_client_frame(game_client);
+    object = *(const u8 *const *)(drawable + g_game->waypoint_lines.drawable_object);
+    if (object == NULL) return;
+    if (!g_spawn_started) {
+        g_spawn_started = TRUE;
+        g_spawn_first_frame = frame;
+        log_line("height log: S id frame phase s fresh | obj x y z | prev x y z ok | "
+                 "p1 x y z | p2 x y z | drawn x y z | flags");
+    }
+    slot = (u32)(((uintptr_t)drawable >> 3) * 2654435761u) % SPAWN_SEEN_SIZE;
+    seen = &g_spawn_seen[slot];
+    fresh = seen->drawable != drawable || frame - seen->frame > g_rate;
+    seen->drawable = drawable;
+    seen->frame = frame;
+    pos = (const float *)(object + g_game->waypoint_lines.object_position);
+    for (i = 0; i < SPAWN_FOLLOW_MAX; ++i) {
+        if (g_spawn_follow[i].drawable == drawable) follow = &g_spawn_follow[i];
+    }
+    if (follow == NULL) {
+        dz = m[11] - pos[2];
+        if (frame - g_spawn_first_frame < 10u * g_rate || (dz <= 4.0f && dz >= -4.0f)) return;
+        for (i = 0; i < SPAWN_FOLLOW_MAX && follow == NULL; ++i) {
+            if (g_spawn_follow[i].drawable == NULL) follow = &g_spawn_follow[i];
+        }
+        if (follow == NULL) return;
+        follow->drawable = drawable;
+        follow->id = ++g_spawn_next_id;
+        follow->frames = 0;
+        follow->last_frame = frame - 1u;
+    }
+    if (follow->last_frame == frame) return;
+    follow->last_frame = frame;
+    engine = *(const u8 *const *)game_address(g_game, g_game->timing.game_engine_pointer);
+    prev = (const float *)(object + OBJECT_PREVIOUS_POSITION);
+    log_printf("S %u %u %u %.4f %d | %.2f %.2f %.2f | %.2f %.2f %.2f %u | %.2f %.2f %.2f | "
+               "%.2f %.2f %.2f | %.2f %.2f %.2f | 0x%08X",
+               follow->id, frame, engine ? *(const u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) : 0u,
+               engine ? (double)*(const float *)(engine + ENGINE_LOGIC_PHASE_INTERPOLATION) : -1.0,
+               fresh ? 1 : 0, (double)pos[0], (double)pos[1], (double)pos[2],
+               (double)prev[0], (double)prev[1], (double)prev[2],
+               object[OBJECT_PREVIOUS_POSITION_VALID],
+               (double)p1[0], (double)p1[1], (double)p1[2],
+               (double)p2[0], (double)p2[1], (double)p2[2],
+               (double)m[3], (double)m[7], (double)m[11],
+               *(const u32 *)(drawable + DRAWABLE_FLAGS));
+    ++g_spawn_lines;
+    if (++follow->frames >= SPAWN_FOLLOW_FRAMES) follow->drawable = NULL;
+    if (g_spawn_lines == g_config->debug_spawn_frames) log_line("height log: complete");
+}
+
+/*
+ * The trampoline is called through a volatile pointer of the right type:
+ * calling the naked void(void) function through a cast is undefined
+ * behaviour, and clang deleted the whole wrapper body (boot crash).
+ */
+typedef const float *(THISCALL *SpawnTransformFn)(u8 *drawable);
+static SpawnTransformFn volatile g_spawn_transform_trampoline;
+
+static const float *THISCALL interpolated_transform_logged(u8 *drawable) {
+    const float *m = g_spawn_transform_trampoline(drawable);
+    log_spawn_transform(drawable, m);
+    return m;
+}
+
+/*
+ * The original's early return keeps ECX, EDX and the XMM registers, so its
+ * callers may rely on them: the patched entry comes here, which keeps them
+ * around the C wrapper (ECX = drawable on entry, result in EAX).
+ */
+__attribute__((naked)) static void interpolated_transform_entry(void) {
+    __asm__ volatile("pushl %%ecx\n\t"
+                     "pushl %%edx\n\t"
+                     "subl $128, %%esp\n\t"
+                     "movdqu %%xmm0, 0(%%esp)\n\t"
+                     "movdqu %%xmm1, 16(%%esp)\n\t"
+                     "movdqu %%xmm2, 32(%%esp)\n\t"
+                     "movdqu %%xmm3, 48(%%esp)\n\t"
+                     "movdqu %%xmm4, 64(%%esp)\n\t"
+                     "movdqu %%xmm5, 80(%%esp)\n\t"
+                     "movdqu %%xmm6, 96(%%esp)\n\t"
+                     "movdqu %%xmm7, 112(%%esp)\n\t"
+                     "calll %c0\n\t"
+                     "movdqu 0(%%esp), %%xmm0\n\t"
+                     "movdqu 16(%%esp), %%xmm1\n\t"
+                     "movdqu 32(%%esp), %%xmm2\n\t"
+                     "movdqu 48(%%esp), %%xmm3\n\t"
+                     "movdqu 64(%%esp), %%xmm4\n\t"
+                     "movdqu 80(%%esp), %%xmm5\n\t"
+                     "movdqu 96(%%esp), %%xmm6\n\t"
+                     "movdqu 112(%%esp), %%xmm7\n\t"
+                     "addl $128, %%esp\n\t"
+                     "popl %%edx\n\t"
+                     "popl %%ecx\n\t"
+                     "retl"
+                     :
+                     : "i"(interpolated_transform_logged));
+}
+
+static void install_spawn_logger(PatchInstaller *installer) {
+    static const u8 prologue[10] = { 0x56, 0x8B, 0xF1, 0x83, 0xBE, 0x40, 0x01, 0x00, 0x00, 0x00 };
+    u32 rva = g_game->waypoint_lines.interpolated_transform_function;
+    u8 jump[10] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90 };
+
+    if (g_config->debug_spawn_frames == 0) return;
+    g_spawn_transform_trampoline = (SpawnTransformFn)(void *)interpolated_transform_original;
+    g_spawn_transform_resume = game_address(g_game, rva + sizeof(prologue));
+    encode_rel32(&jump[1], game_address(g_game, rva + 5u), (const void *)interpolated_transform_entry);
+    patch_bytes(installer, "spawn logger: interpolated transform", rva, prologue, jump, sizeof(jump));
+}
+
+/*
+ * B19: an Object that is moved a long way in one logic tick (a teleport,
+ * e.g. a freshly built Orca created high above the Firestorm airfield and
+ * placed on its pad on the next tick) was drawn sliding along the
+ * Catmull-Rom curve between its old and new position for the whole tick,
+ * then dipped below its target (the oldest curve point was still the old
+ * position). At 30 FPS that is one frame; at 155 FPS about ten. After a
+ * normal history refresh, a jump of more than 250 world units (3,750 per
+ * second; far beyond any unit's speed) is collapsed exactly like the
+ * engine's own snap mode: all curve points, the interpolated position and
+ * the previous rotation become the current ones.
+ */
+enum {
+    HISTORY_P0 = 0xC4,
+    HISTORY_P1 = 0xD0,
+    HISTORY_P2 = 0xDC,
+    HISTORY_P3 = 0xE8,
+    HISTORY_OUT = 0x124,
+    HISTORY_PREVIOUS_MATRIX = 0x64,
+    HISTORY_CURRENT_MATRIX = 0x94,
+    HISTORY_MATRIX_BYTES = 48
+};
+static const float TELEPORT_DISTANCE = 250.0f;
+
+static void collapse_teleport(u8 *drawable, u32 snap) {
+    const float *p1 = (const float *)(drawable + HISTORY_P1);
+    const float *p2 = (const float *)(drawable + HISTORY_P2);
+    float dx;
+    float dy;
+    float dz;
+
+    if ((u8)snap != 0u ||
+        *(void **)(drawable + g_game->waypoint_lines.drawable_object) == NULL) {
+        return;
+    }
+    dx = p2[0] - p1[0];
+    dy = p2[1] - p1[1];
+    dz = p2[2] - p1[2];
+    if (dx * dx + dy * dy + dz * dz <= TELEPORT_DISTANCE * TELEPORT_DISTANCE) return;
+    memcpy(drawable + HISTORY_P0, p2, 3 * sizeof(float));
+    memcpy(drawable + HISTORY_P1, p2, 3 * sizeof(float));
+    memcpy(drawable + HISTORY_P3, p2, 3 * sizeof(float));
+    memcpy(drawable + HISTORY_OUT, p2, 3 * sizeof(float));
+    memcpy(drawable + HISTORY_PREVIOUS_MATRIX, drawable + HISTORY_CURRENT_MATRIX,
+           HISTORY_MATRIX_BYTES);
+}
+
+/* Trampolines: the replaced prologue, then the rest of the original. */
+void *g_history_refresh_resume;
+__attribute__((naked)) static void history_refresh_tw_original(void) {
+    __asm__ volatile("pushl %%ebp\n\t"
+                     "movl %%esp, %%ebp\n\t"
+                     "subl $0x0C, %%esp\n\t"
+                     "jmpl *%c0"
+                     :
+                     : "i"(&g_history_refresh_resume));
+}
+__attribute__((naked)) static void history_refresh_kw_original(void) {
+    __asm__ volatile("pushl %%ebp\n\t"
+                     "movl %%esp, %%ebp\n\t"
+                     "pushl %%ecx\n\t"
+                     "pushl %%ecx\n\t"
+                     "jmpl *%c0"
+                     :
+                     : "i"(&g_history_refresh_resume));
+}
+
+/* Called through typed volatile pointers (never cast-call a naked function). */
+typedef void(THISCALL *HistoryRefreshTwFn)(u8 *drawable, u32 snap);
+typedef void(THISCALL *HistoryRefreshKwFn)(u8 *drawable, u32 snap, u32 force);
+static HistoryRefreshTwFn volatile g_history_refresh_tw;
+static HistoryRefreshKwFn volatile g_history_refresh_kw;
+
+static void THISCALL history_refresh_tw(u8 *drawable, u32 snap) {
+    g_history_refresh_tw(drawable, snap);
+    collapse_teleport(drawable, snap);
+}
+
+static void THISCALL history_refresh_kw(u8 *drawable, u32 snap, u32 force) {
+    g_history_refresh_kw(drawable, snap, force);
+    collapse_teleport(drawable, snap);
+}
+
+static void install_teleport_snap(PatchInstaller *installer) {
+    static const u8 tw_prologue[6] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x0C };
+    static const u8 kw_prologue[5] = { 0x55, 0x8B, 0xEC, 0x51, 0x51 };
+    const HistoryRefreshLayout *refresh = &g_game->history_refresh;
+    u8 jump[6] = { 0xE9, 0, 0, 0, 0, 0x90 };
+
+    if (!refresh->kane) {
+        g_history_refresh_tw = (HistoryRefreshTwFn)(void *)history_refresh_tw_original;
+        g_history_refresh_resume = game_address(g_game, refresh->function + sizeof(tw_prologue));
+        encode_rel32(&jump[1], game_address(g_game, refresh->function + 5u),
+                     (const void *)history_refresh_tw);
+        patch_bytes(installer, "interpolation history refresh (teleport snap)", refresh->function,
+                    tw_prologue, jump, sizeof(tw_prologue));
+    } else {
+        g_history_refresh_kw = (HistoryRefreshKwFn)(void *)history_refresh_kw_original;
+        g_history_refresh_resume = game_address(g_game, refresh->function + sizeof(kw_prologue));
+        encode_rel32(&jump[1], game_address(g_game, refresh->function + 5u),
+                     (const void *)history_refresh_kw);
+        patch_bytes(installer, "interpolation history refresh (teleport snap)", refresh->function,
+                    kw_prologue, jump, sizeof(kw_prologue));
+    }
+}
+
+static void install_apt_call_counter(PatchInstaller *installer) {
+    static const u8 prologue[6] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20 };
+    static void (*const stubs[APT_CALL_FUNCTIONS])(void) = {
+        apt_call_stub_0, apt_call_stub_1, apt_call_stub_2, apt_call_stub_3, apt_call_stub_4
+    };
+    static const char *const names[APT_CALL_FUNCTIONS] = {
+        "APT call variant 0", "APT call variant 1", "APT call variant 2",
+        "APT call variant 3", "APT call variant 4"
+    };
+    const AptCallLayout *apt = &g_game->apt_calls;
+    u32 hooked;
+    u32 i;
+
+    if (g_config->debug_apt_calls == 0u) return;
+    if (apt->count != APT_CALL_FUNCTIONS) {
+        log_line("debug_apt_calls: APT call functions not found, diagnostic off");
+        return;
+    }
+    g_apt_call_window_start = timeGetTime();
+    hooked = APT_CALL_FUNCTIONS;
+    if (g_config->debug_apt_calls == 2u && apt->variable_function != 0u) {
+        static const u8 variable_prologue[6] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24 };
+        u8 jump[6] = { 0xE9, 0, 0, 0, 0, 0x90 };
+        g_apt_variable_resume = game_address(g_game, apt->variable_function + 6u);
+        encode_rel32(&jump[1], game_address(g_game, apt->variable_function + 5u),
+                     (const void *)apt_variable_stub);
+        patch_bytes(installer, "APT variable set (trace)", apt->variable_function,
+                    variable_prologue, jump, sizeof(jump));
+    }
+    for (i = 0; i < hooked; ++i) {
+        u8 jump[6] = { 0xE9, 0, 0, 0, 0, 0x90 };
+        g_apt_call_resume[i] = game_address(g_game, apt->functions[i] + sizeof(prologue));
+        encode_rel32(&jump[1], game_address(g_game, apt->functions[i] + 5u), (const void *)stubs[i]);
+        patch_bytes(installer, names[i], apt->functions[i], prologue, jump, sizeof(jump));
+    }
+}
+
 static void request_apt_tick(void) {
     u8 *player;
 
@@ -3857,6 +4341,33 @@ static void install_frame_limiter(PatchInstaller *installer) {
                 interval_expected, interval_patch, sizeof(interval_patch));
 }
 
+/*
+ * Diagnostic (debug_disable=a,b,...): skip the named features at install,
+ * to find which one causes a glitch. Names are the install_* suffixes.
+ */
+static BOOL feature_disabled(const char *name) {
+    const char *list = g_config->debug_disable;
+    size_t length = strlen(name);
+    const char *p = list;
+
+    while (*p != '\0') {
+        while (*p == ',' || *p == ' ') ++p;
+        if (strncmp(p, name, length) == 0 &&
+            (p[length] == '\0' || p[length] == ',' || p[length] == ' ')) {
+            log_printf("debug_disable: %s skipped", name);
+            return TRUE;
+        }
+        while (*p != '\0' && *p != ',') ++p;
+    }
+    return FALSE;
+}
+
+#define INSTALL_FEATURE(name) \
+    do { \
+        if (!feature_disabled(#name)) install_##name(&installer); \
+    } while (0)
+
+
 BOOL game_patches_install(const GameLayout *game, const Config *config) {
     PatchInstaller installer;
 
@@ -3877,30 +4388,33 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     patch_transaction_init(&installer.transaction);
     installer.ok = TRUE;
 
-    install_continuous_visuals(&installer);
-    install_keyboard_timing(&installer);
-    install_audio_timing(&installer);
-    install_objective_indicator_tick(&installer);
-    install_selection_panel_name(&installer);
-    install_camera_timing(&installer);
-    install_frame_authored_effects(&installer);
-    install_drawable_physics_timing(&installer);
-    install_tracer_motion(&installer);
-    install_camera_ease_timing(&installer);
-    install_shroud_timing(&installer);
-    install_tint_envelope_timing(&installer);
-    install_minimap_glide(&installer);
-    install_waypoint_lines(&installer);
-    install_effect_timing(&installer);
-    install_particle_index(&installer);
-    install_trail_vertex_fix(&installer);
-    install_frame_boundary(&installer);
-    install_range_stats(&installer);
-    install_drawable_interpolation_window(&installer);
-    install_particle_and_cursor_timing(&installer);
-    install_phase_scheduler(&installer);
-    install_w3d_clock(&installer);
-    install_frame_limiter(&installer);
+    INSTALL_FEATURE(continuous_visuals);
+    INSTALL_FEATURE(keyboard_timing);
+    INSTALL_FEATURE(audio_timing);
+    INSTALL_FEATURE(objective_indicator_tick);
+    INSTALL_FEATURE(selection_panel_name);
+    INSTALL_FEATURE(camera_timing);
+    INSTALL_FEATURE(frame_authored_effects);
+    INSTALL_FEATURE(drawable_physics_timing);
+    INSTALL_FEATURE(tracer_motion);
+    INSTALL_FEATURE(camera_ease_timing);
+    INSTALL_FEATURE(shroud_timing);
+    INSTALL_FEATURE(tint_envelope_timing);
+    INSTALL_FEATURE(minimap_glide);
+    INSTALL_FEATURE(waypoint_lines);
+    INSTALL_FEATURE(effect_timing);
+    INSTALL_FEATURE(particle_index);
+    INSTALL_FEATURE(trail_vertex_fix);
+    INSTALL_FEATURE(frame_boundary);
+    INSTALL_FEATURE(range_stats);
+    INSTALL_FEATURE(apt_call_counter);
+    INSTALL_FEATURE(spawn_logger);
+    INSTALL_FEATURE(teleport_snap);
+    INSTALL_FEATURE(drawable_interpolation_window);
+    INSTALL_FEATURE(particle_and_cursor_timing);
+    INSTALL_FEATURE(phase_scheduler);
+    INSTALL_FEATURE(w3d_clock);
+    INSTALL_FEATURE(frame_limiter);
 
     /* No live timing globals have been changed yet, so rollback is complete. */
     if (!installer.ok) goto rollback;
@@ -3968,6 +4482,10 @@ void game_patches_reset_state(void) {
         g_tick_frame = 0u;
         g_tick_accumulator = 0u;
         g_tick_carry = 0u;
+        g_spawn_started = FALSE;
+        g_apt_trace_started = FALSE;
+        memset(g_spawn_follow, 0, sizeof(g_spawn_follow));
+        memset(g_spawn_seen, 0, sizeof(g_spawn_seen));
         g_minimap_following = FALSE;
         g_minimap_has_shown = FALSE;
         /* Seed so audio service runs before the first logic-phase slice. */

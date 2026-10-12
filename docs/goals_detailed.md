@@ -1139,6 +1139,238 @@ GDI missile soldiers in mission 1).
 
 ---
 
+## B19 / B20. One-frame glitches: aircraft in the air, build icons gone
+
+**Status:** diagnosing (2026-10-12).
+
+**Reports (TW 1.9 + Firestorm, 155 FPS):**
+- **B19:** a freshly produced aircraft at the Firestorm airfield shows in
+  the air for one frame. Not at 30 FPS, and not on TW 1.10 (vanilla data)
+  with the patch.
+- **B20:** after clicking a build button, the other available build icons
+  vanish for one frame (screenshots: the top row is gone and the clicked
+  button is white with "1").
+
+**Hypothesis (shared): half-finished logic ticks being drawn.**
+- At 30 FPS the stock schedule runs the six phases as 1–3 | 4–6, so a frame
+  is only ever drawn after phase 3 or 6. Our spread schedule (one phase per
+  frame above 90 FPS) also draws after phases 1, 2, 4 and 5.
+- A new object's drawable has no interpolation history yet, so it uses the
+  Object's live transform (B4 notes). If production creates the aircraft in
+  one phase and parks it in a later one, the in-between position is shown
+  for a frame. That would be invisible at 30 FPS when both happen in the
+  same half.
+- A build command is processed in phase 1. If the build panel's
+  availability is refreshed in a later phase, a frame drawn after phase 1
+  shows the half-updated list.
+- Neither is mod-specific: the stock 60/90 FPS schedules also draw between
+  phases.
+
+**Test option `vanilla_phase_batches=1`** (default 0):
+- Phases 1–3 run in a tick's first frame and 4–6 in its last; frames in
+  between run no logic.
+- `own_schedule` also covers 45–90 in this mode.
+- `IsClientFrameBoundary` additionally requires the tick's first frame,
+  because the counter rests at 3.
+- `temp/scheduler_sim_vanilla.py`: 0 errors over 16–240 FPS (phase order,
+  ticks, flushes, one boundary per tick), and frames are drawn only after
+  phase 3 or 6. The default schedule is unchanged (`scheduler_sim.py`: 0
+  errors).
+- Costs: logic is concentrated in two (adjacent) frames per tick, which
+  worsens frame-time spikes in big battles.
+
+**Test result (2026-10-12): neither glitch went away** with
+`vanilla_phase_batches=1`. The deployed DLL and ini were verified; the
+option was active. Half-finished ticks are ruled out and the option was
+removed.
+
+**New hypotheses:**
+- **B20, the UI clock.** Like B1/B6: the Flash UI advances movie frames at
+  ~30 Hz (`AptPlayer_Update`), while the C++ build-queue code changes the
+  panel per client frame. New or rebuilt button clips initialise on the next
+  Apt frame, so for a few client frames the slots look empty. A fix would
+  force an Apt tick (`AptPlayer+0x1E9`) when the build panel rebuilds.
+  C++ → Flash traffic goes through variables (`0x773D27`, 52 callers) and
+  five queued-call variants (`0x773A18`..`0x773BD7`, 63 callers of
+  `0x773A92`). Diagnostic `debug_apt_calls=1`: entry stubs on the five
+  variants count calls per call site and log the busiest once per second.
+  This shows which build-queue calls fire on a click, and whether forcing a
+  tick on them is cheap.
+- **B19, interpolation of a new object.** A new Object's previous position
+  is its spawn point (`+0x1A8`, valid flag `+0x1C1`: cleared by the
+  constructor `0x659E77`, set by `0x4AFAFD`). If the airfield spawns it in
+  the air and moves it to the pad, the drawn curve may start in the air for
+  the first frames. Diagnostic `debug_spawn_frames=N`:
+  - follows new objects (+0x1C1 still 0, from 10 s into a session) for 45
+    frames each;
+  - logs phase, `s`, tick frame/F, Object current and previous position,
+    the history pair, the drawn position (all with z) and the physics z.
+
+  TW offsets, verified identical in TW 1.9 (the interpolation code matches
+  byte for byte).
+
+**Log 1 (`temp/diag_b19b20/fps_patch.log`, TW 1.9 + Firestorm, 90 FPS):**
+- **UI calls:** ~1,000 at session start, then rare bursts (2–16/s). At the
+  build clicks, the busy call sites are `OnInitialized` callbacks of new
+  clips:
+  - 1.9 `0x9D7FFF` → `SetAffordable` (a build button);
+  - `0x9A5FD0` and `0x9BE018` → `SetAdjusted`;
+  - the help box's `OnOpen`/`OnClosed`.
+
+  So **clicking makes the build menu create new button clips**. They stay
+  empty until `OnInitialized` runs on the next ~30 Hz APT frame. This is the
+  B1 mechanism.
+- **Spawns:** the physics-hook logger caught six stationary objects (one
+  every 10 s, z 120, no physics), **not the aircraft**. Their logic and
+  drawn positions were identical from the first frame. A new Object's
+  "previous position" holds garbage until its first tick.
+
+**B20 fix (implemented):**
+- The game registers every new clip's `"OnInitialized"` listener through
+  queued-call variant 0 (1.10 `0x773A18`): `PUSH EDI; PUSH "OnInitialized";
+  ECX = gadget; CALL`.
+- That string (TW 1.10 `0xAB8E94`, the tail of `"<OnInitialized"`) is
+  pushed before variant 0 at 60 sites (TW) or 83 (KW). Variant 1 with the
+  same name is the removal inside the callbacks.
+- Fix: a permanent stub on variant 0's entry (prologue `55 8B EC 83 EC 20`
+  replayed). When the second stack argument is that string, it sets
+  `AptPlayer+0x1E9` (`request_apt_tick`, as B1), so the new clip initialises
+  before the frame is drawn.
+- Resolver: exactly five call variants, and the string pushed most often
+  (≥ 10 times) within 17 bytes before a CALL of variant 0, which must read
+  `OnInitialized`. Verified on all four builds. If unresolved, the fix is
+  skipped and logged.
+
+**B19 logger 2:** `debug_spawn_frames=N` now wraps
+`Drawable::getInterpolatedTransform` (the B11 resolver's function, prologue
+`56 8B F1 83 BE 40 01 00 00 00`, same in all four builds). It follows
+drawables not seen during the previous second (from 10 s in) for 30 frames
+and logs phase, `s`, the Object position and the drawn translation (with
+height).
+
+**Test round 3 (2026-10-12):**
+- The `OnInitialized` tick fix did **not** stop the flicker. New clue from
+  the screenshots: after cancelling a build, only buttons whose state
+  changed vanish (the unlocked ones). The locked Tech Center and the
+  clicked Crane stay, and the grid background is gone for that frame.
+- Without the DLL at 30 FPS: **no flicker**. So it's caused by the patch
+  or by the higher rate.
+- The aircraft still flashes in the air. Spawn logger 3 (getInterpolatedTransform,
+  brand-new Objects only, 155 FPS): every logged object is drawn exactly at
+  its logic position. Two new objects appear in phase 5 at (0, 0, 0) and
+  are drawn for one frame only.
+- So the flash isn't in the Drawable interpolation path.
+
+**Bisect switch `debug_disable=`** (comma-separated install features,
+case-insensitive; skipped features are logged). Names:
+`continuous_visuals`, `keyboard_timing`, `audio_timing`,
+`objective_indicator_tick` (B1), `selection_panel_name` (B6),
+`camera_timing`, `frame_authored_effects` (tracer/cloud/Anim2D frame reads),
+`drawable_physics_timing` (B2), `tracer_motion`, `camera_ease_timing`,
+`shroud_timing` (B7), `tint_envelope_timing` (B9), `minimap_glide` (B10),
+`waypoint_lines` (B11), `effect_timing` (B14/B15), `particle_index` (M1),
+`trail_vertex_fix` (M3a), `frame_boundary`, `range_stats`,
+`apt_call_counter` (B20 tick + debug_apt_calls), `spawn_logger`,
+`drawable_interpolation_window` (B4), `particle_and_cursor_timing` (B3),
+`phase_scheduler`, `w3d_clock`, `frame_limiter`. The last three (and
+`frame_boundary`) are core to running above 30 FPS.
+
+**Bisect (2026-10-12, TW 1.9 + Firestorm, 90 FPS; log verified each time):**
+- Run 1: eight UI/drawing features off. Both glitches remain.
+- Run 2: all 22 non-core features off (only 10 core patch writes left:
+  rate globals, scheduler hooks, W3D clock, limiter). **Both glitches
+  remain.**
+- So they come from the game itself running above 30 FPS, not from one of
+  our fixes.
+
+**B19 cause and fix (implemented, needs a test):**
+- `GameClient_update` (1.10 `0x48EBF1`) runs, per drawable,
+  `Drawable_updateDrawable(IsClientFrameBoundary())`. In
+  `updateDrawable` (`0x48353F`) the flag gates exactly one block: applying
+  a **pending model-state change** (+0x147 dirty → `0x4718D7` and the +0x23C
+  model observers, which set the model condition/pose).
+- Boundary frames are every other frame at 30 FPS, but once per tick at
+  90+ FPS. So a fresh aircraft's model condition (parked/landed) can wait
+  up to five frames, and meanwhile its default (airborne) pose is drawn.
+  The logic and drawable positions were correct (spawn logger), so the
+  wrong part is the pose.
+- Fix `model_state_every_frame`: the loop's `PUSH [EBP-0x18]` becomes
+  `PUSH 1; NOP`, so a pending change is applied on the next frame. The
+  block only runs while +0x147 is set, and it clears it. The swap path
+  `0x5ED320` keeps its own argument.
+- Resolver: the unique call site (`FF 75 ?? 8B CE E8 … 8B 75 ?? 85 F6 0F
+  85`) whose callee matches the `updateDrawable` prologue with the +0x147
+  test. Verified on all four builds.
+- Other boundary-gated client work (drawable shroud status refresh, ghost
+  objects) is unchanged.
+
+**B20, still diagnosing:**
+- Without the DLL at 30 FPS: no flicker. With only the core patch at 90:
+  flicker.
+- The variant-0 `OnInitialized` tick stays in (harmless) until the trace
+  explains it.
+- Trace mode `debug_apt_calls=2`: one line per queued call (variants 0–4)
+  and per variable set (new entry stub on `0x773D27`, prologue
+  `55 8B EC 83 EC 24`, optional resolver), with client frame, time, call
+  site and name (the second argument, when it points into the image). It
+  starts 10 s into a game and stops after 4,000 lines.
+
+**Test round 4 (2026-10-12): neither fix worked.** The aircraft still
+flashes with `model_state_every_frame`, and the icons still flicker. Both
+attempts (that patch, and the B20 `OnInitialized` tick) were **removed**.
+The diagnostics stay.
+- The trace hit its 4,000-line cap after 34 s: `UnitName` (B6 re-send) and
+  `Resource` are pushed every frame.
+- It does show how build buttons get their icons: `Image` (variant 3)
+  plus `OnContentLoaded` callbacks, i.e. **the icon is loaded as content and
+  reported on a later UI frame**, in addition to `OnInitialized`.
+- The trace now skips `UnitName`/`Resource` and allows 20,000 lines.
+
+**B19 root cause (height detector log `temp/diag_b19_4`, TW 1.9 +
+Firestorm, 155 FPS, Orca Fighter at the GDI airfield):**
+- The Orca is **created at z = 520** (high above its pad, frame 32851,
+  phase 5) and **placed on the pad (z = 125.35) in one step on the next
+  tick**.
+- The drawable then interpolates that teleport like movement: p1 = 520,
+  p2 = 125, drawn z 454 → 416 → … → 147 over the whole tick. On the
+  following tick it dips to ~96 (below the pad) and back, because p0 is
+  still 520.
+- At 30 FPS the same happens over two frames (one frame halfway), which
+  is easy to miss. At 155 FPS it's ~10 frames. After that the Orca is
+  hidden inside the opening pad (screenshot 3).
+
+**Fix `teleport_snap` (implemented, needs a test):**
+- An entry hook on `Drawable::refreshInterpolationHistory` (TW 1.10
+  `0x474EAF`, thiscall(snap), RET 4, prologue `55 8B EC 83 EC 0C`; KW 1.03
+  `0x4BAB25`, thiscall(snap, force), RET 8, prologue `55 8B EC 51 51`).
+- After a normal refresh: if `|p2 − p1| > 250` world units (3,750/s), copy
+  p2 into p0, p1, p3 and the output (+0x124), and the current rotation
+  (+0x94) into the previous one (+0x64, 48 bytes). That's exactly what the
+  engine's own snap mode does.
+- Offsets are identical in TW and KW. Signatures (TW and KW shapes) are
+  verified on all four builds. The trampolines are called through typed
+  volatile pointers. The compiled wrappers were checked (ECX kept,
+  `ret 4` / `ret 8`).
+- The diagnostic `debug_spawn_frames` is now a "drawn height ≠ logic
+  height" detector: more than 4 units → follow for 12 frames, with the
+  Object's previous position, history pair, drawn position and flags.
+
+**B20 trace 2 (`temp/diag_b20_trace2`):** during the Crane clicks
+(frames 31309–31569) the only UI traffic is the tooltip being rebuilt about
+every 5 frames (`Title`/`HotKey`/`Text`, `OnInitialized` → `OnOpen`). Nothing
+reaches the button grid through queued calls or variable sets, so the grid
+changes reach Flash another way (still open).
+
+**Earlier design options (for the ruled-out hypothesis):**
+- Batches 1–3 | 4–6 only when logic is light (cheap there), spreading when
+  heavy.
+- 4–6 halfway through the tick, which needs the engine's wrap handled
+  without the phase-6 counter trick: `GameEngine_update` bumps a tick
+  counter and sets a "new tick" flag on every wrap.
+- Or targeted fixes (hide a new drawable until the next 3/6 boundary).
+
+---
+
 ## Check: can the patch change game logic? (2026-10-12)
 
 Asked after an infantry unit got stuck on a bridge (mission 1, TW 1.9 +

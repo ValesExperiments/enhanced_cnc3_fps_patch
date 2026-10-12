@@ -8,6 +8,8 @@ void config_set_defaults(Config *config) {
     config->debug_motion_frames = 0;
     config->debug_frame_times = 0;
     config->debug_trail_draws = 0;
+    config->debug_apt_calls = FALSE;
+    config->debug_spawn_frames = 0;
     config->adaptive_fps = TRUE;
     config->profiler = FALSE;
     config->profiler_report_seconds = 60;
@@ -42,6 +44,22 @@ BOOL config_load(Config *config, const wchar_t *path) {
         L"fps_patch", L"debug_frame_times", config->debug_frame_times, path);
     config->debug_trail_draws = GetPrivateProfileIntW(
         L"fps_patch", L"debug_trail_draws", config->debug_trail_draws, path);
+    config->debug_apt_calls = GetPrivateProfileIntW(
+        L"fps_patch", L"debug_apt_calls", config->debug_apt_calls, path);
+    config->debug_spawn_frames = GetPrivateProfileIntW(
+        L"fps_patch", L"debug_spawn_frames", config->debug_spawn_frames, path);
+    {
+        wchar_t wide[512];
+        DWORD length = GetPrivateProfileStringW(L"fps_patch", L"debug_disable", L"", wide,
+                                                ARRAY_COUNT(wide), path);
+        DWORD i;
+        for (i = 0; i < length && i + 1u < sizeof(config->debug_disable); ++i) {
+            wchar_t c = wide[i];
+            if (c >= L'A' && c <= L'Z') c = (wchar_t)(c - L'A' + L'a');
+            config->debug_disable[i] = (c < 128) ? (char)c : '?';
+        }
+        config->debug_disable[i] = '\0';
+    }
     config->adaptive_fps = GetPrivateProfileIntW(
         L"fps_patch", L"adaptive_fps", config->adaptive_fps, path) != 0;
     config->profiler = GetPrivateProfileIntW(L"fps_patch", L"profiler", config->profiler, path) != 0;

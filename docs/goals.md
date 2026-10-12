@@ -39,6 +39,8 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | B16 | Rocket smoke trails should stay connected to the rocket (they started a bit behind it) | Implemented 2026-10-12, **needs in-game test** |
 | B17 | Using the Ion Cannon in mission 1 (TW 1.9 mod) must not crash | Implemented 2026-10-12, **needs in-game test** |
 | B18 | No micro-stutter on smoothly moving units (aircraft) at rates that aren't multiples of 15 (e.g. 155) | Implemented 2026-10-12, **needs in-game test** |
+| B19 | Newly produced aircraft (Firestorm airfield) must not show in the air for one frame | Cause found (a teleport drawn as a slide); fix `teleport_snap` implemented 2026-10-12, **needs in-game test** |
+| B20 | Build menu icons must not vanish for one frame after clicking a build button | **Diagnosing**: game behaviour at high FPS (bisect); the OnInitialized UI tick didn't help and was removed; per-frame UI trace (`debug_apt_calls=2`) |
 
 ## Groundwork needed first
 

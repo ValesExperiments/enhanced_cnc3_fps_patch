@@ -151,6 +151,8 @@ static int check(const char *path) {
         { "trail_vertices", resolve_trail_vertex_sites },
         { "frame_boundary", resolve_frame_boundary_sites },
         { "range_query", resolve_range_query_sites },
+        { "apt_calls", resolve_apt_call_sites },
+        { "history_refresh", resolve_history_refresh_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -249,6 +251,13 @@ static int check(const char *path) {
                full.range_query.query_calls[1].instruction,
                full.range_query.query_calls[2].instruction, full.range_query.distance_table,
                full.range_query.add_call.instruction, full.range_query.add_call.target);
+        printf("  apt variable function 0x%X\n", full.apt_calls.variable_function);
+        printf("  history refresh 0x%X (%s)\n", full.history_refresh.function,
+               full.history_refresh.kane ? "KW, 2 args" : "TW, 1 arg");
+        printf("  apt call variants %u: 0x%X 0x%X 0x%X 0x%X 0x%X\n", full.apt_calls.count,
+               full.apt_calls.functions[0], full.apt_calls.functions[1],
+               full.apt_calls.functions[2], full.apt_calls.functions[3],
+               full.apt_calls.functions[4]);
         printf("  particle sibling search setup 0x%X, mismatch jump 0x%X\n",
                full.particle_list.sibling_setup, full.particle_list.sibling_mismatch);
         printf("  minimap look-at copies %u, view 0x%X\n",

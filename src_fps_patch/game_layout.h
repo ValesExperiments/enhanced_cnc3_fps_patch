@@ -65,6 +65,33 @@ typedef struct RangeQueryLayout {
     BranchSite add_call;
 } RangeQueryLayout;
 
+enum { APT_CALL_FUNCTIONS = 5 };
+
+typedef struct AptCallLayout {
+    /*
+     * Diagnostic (debug_apt_calls): the five "queue an ActionScript call"
+     * variants (TW 1.10 VA 0x773A18 .. 0x773BD7, 0x773A92 among them), all
+     * starting PUSH EBP; MOV EBP,ESP; SUB ESP,0x20. count is 0 when they
+     * aren't found exactly (the diagnostic is then unavailable).
+     */
+    u32 functions[APT_CALL_FUNCTIONS];
+    u32 count;
+    /* Diagnostic: the "set an ActionScript variable" function (TW 1.10 0x773D27), or 0. */
+    u32 variable_function;
+} AptCallLayout;
+
+typedef struct HistoryRefreshLayout {
+    /*
+     * B19: Drawable::refreshInterpolationHistory (TW 1.10 VA 0x474EAF,
+     * thiscall(snap), RET 4; KW 1.03 0x4BAB25, thiscall(snap, force), RET 8).
+     * Normal mode builds the Catmull-Rom points p0..p3 (+0xC4/+0xD0/+0xDC/
+     * +0xE8) from the Object's previous and current positions; snap mode
+     * sets them all to the current position.
+     */
+    u32 function;
+    BOOL kane;       /* two arguments, 5-byte prologue */
+} HistoryRefreshLayout;
+
 typedef struct FrameBoundaryLayout {
     /*
      * GameEngine::IsClientFrameBoundary (TW 1.10 VA 0x548131, 8 callers):
@@ -455,6 +482,8 @@ typedef struct GameLayout {
     TrailVertexLayout trail_vertices;
     FrameBoundaryLayout frame_boundary;
     RangeQueryLayout range_query;
+    AptCallLayout apt_calls;
+    HistoryRefreshLayout history_refresh;
 } GameLayout;
 
 typedef enum GameResolveResult {

@@ -30,6 +30,21 @@ debug_frame_times=0
 ; fps_patch.log (requires logging=1). 0 = off.
 debug_trail_draws=0
 
+; Diagnostic: log the game's queued UI (Flash) calls to fps_patch.log
+; (requires logging=1). 1 = per call site once per second, 2 = every call
+; and variable change with its frame number (from 10 s into a game), 0 = off.
+debug_apt_calls=0
+
+; Diagnostic: log this many lines comparing where newly appearing units are
+; in the game logic and where they're drawn (with height), for their first
+; 30 frames, starting 10 s into a game (requires logging=1). 0 = off.
+debug_spawn_frames=0
+
+; Diagnostic: comma-separated patch features to switch off, to find which one
+; causes a glitch (e.g. selection_panel_name,objective_indicator_tick). Names
+; are listed in docs/goals_detailed.md. Empty = everything on.
+debug_disable=
+
 ; Diagnostic (multi-core research): sample where the game's main thread spends
 ; its time and write fps_profile.log next to the DLL every
 ; profiler_report_seconds. Costs about 3% of one CPU core. 1 = on, 0 = off.

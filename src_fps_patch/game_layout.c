@@ -2020,6 +2020,81 @@ static BOOL resolve_frame_boundary_sites(
            module[game->frame_boundary.function + 42u] == 0x40u;
 }
 
+/* Drawable::refreshInterpolationHistory: TW (1 argument) and KW (2 arguments) shapes. */
+static const u16 g_history_refresh_tw_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x0C, 0x53, 0x8B, 0xD9, 0x80, 0x8B, 0x44, 0x01, 0x00, 0x00, 0x80,
+    0x83, 0x8B, 0x30, 0x01, 0x00, 0x00, 0xFF, 0x83, 0x8B, 0x34, 0x01, 0x00, 0x00, 0xFF, 0x8B, 0x0D,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B, 0x01, 0xFF, 0x50, 0x78
+};
+static const u16 g_history_refresh_kw_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x51, 0x51, 0x53, 0x8B, 0xD9, 0x80, 0x8B, 0x44, 0x01, 0x00, 0x00, 0x80,
+    0x83, 0x8B, 0x30, 0x01, 0x00, 0x00, 0xFF, 0x83, 0x8B, 0x34, 0x01, 0x00, 0x00, 0xFF, 0x56,
+    0x8D, 0xB3, 0x38, 0x01, 0x00, 0x00, 0x83, 0x3E, 0xFF, 0x0F
+};
+
+static BOOL resolve_history_refresh_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    HistoryRefreshLayout *refresh = &game->history_refresh;
+
+    if (FIND_UNIQUE(module, nt, g_history_refresh_tw_pattern, &refresh->function)) {
+        refresh->kane = FALSE;
+        return TRUE;
+    }
+    if (FIND_UNIQUE(module, nt, g_history_refresh_kw_pattern, &refresh->function)) {
+        refresh->kane = TRUE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* The five queued ActionScript call variants (diagnostic; optional). */
+static const u16 g_apt_call_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20, 0x56, 0x8D, 0x45, 0x0C, 0x50, 0xFF, 0x75, 0x0C, 0x8D,
+    0x45, 0x08, 0x68, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xFF, 0x75, 0x08,
+    0x8B, 0xF1, 0x50, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x59, 0x59,
+    0x50, 0x8D, 0x45, 0xF4, 0x50, 0xE8
+};
+
+static const u16 g_apt_variable_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24, 0x83, 0x3D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    PATTERN_ANY, 0x00, 0x56, 0x8B, 0xF1, 0x0F, 0x84, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0x57,
+    0x8D, 0x45, 0x08, 0x50, 0xFF, 0x75, 0x0C, 0x8D, 0x45, 0xFC, 0x68, PATTERN_ANY, PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, 0xFF, 0x75, 0x08, 0x50, 0xE8
+};
+
+static BOOL resolve_apt_call_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    AptCallLayout *apt = &game->apt_calls;
+    u32 found = 0;
+    u16 section_index;
+
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections;
+         ++section_index, ++section) {
+        u32 start = section->VirtualAddress;
+        u32 size = section->Misc.VirtualSize;
+        u32 offset;
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
+            start >= nt->OptionalHeader.SizeOfImage ||
+            size > nt->OptionalHeader.SizeOfImage - start || size < sizeof(g_apt_call_pattern) / 2u) {
+            continue;
+        }
+        for (offset = 0; offset <= size - (u32)ARRAY_COUNT(g_apt_call_pattern); ++offset) {
+            if (!pattern_matches(module + start + offset, g_apt_call_pattern,
+                                 ARRAY_COUNT(g_apt_call_pattern))) {
+                continue;
+            }
+            if (found < APT_CALL_FUNCTIONS) apt->functions[found] = start + offset;
+            ++found;
+        }
+    }
+    /* Optional: the diagnostic is simply unavailable without exactly five. */
+    apt->count = found == APT_CALL_FUNCTIONS ? found : 0u;
+    if (!FIND_UNIQUE(module, nt, g_apt_variable_pattern, &apt->variable_function)) {
+        apt->variable_function = 0;
+    }
+    return TRUE;
+}
+
 /* Partition range query and its tree walk (identical in all four builds). */
 static const u16 g_range_query_pattern[] = {
     0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x28, 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x4D, 0x08, 0x57,
@@ -2308,6 +2383,8 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_trail_vertex_sites(module, nt, &game) ||
         !resolve_frame_boundary_sites(module, nt, &game) ||
         !resolve_range_query_sites(module, nt, &game) ||
+        !resolve_apt_call_sites(module, nt, &game) ||
+        !resolve_history_refresh_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

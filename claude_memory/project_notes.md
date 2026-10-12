@@ -359,3 +359,11 @@ Fix or remove anything that turns out to be wrong.
   Bresenham split must use the continuous form (j·15 − carry)/rate, not j/F.
   j/F makes motion speed wobble with the 10/11-frame pattern (seen on aircraft
   at 155 FPS). `temp/interp_sim.py` checks it.
+- **Clang UB trap (2026-10-12, boot crash):** never call a naked asm stub from C
+  through a cast to another function type. Clang treated it as undefined behaviour
+  and deleted the whole calling function, leaving only `push ebp; mov ebp,esp`, so
+  it fell into the next function. Call it through a `volatile` function-pointer
+  variable of the right type instead. After adding stubs, check the generated asm
+  (`zig cc ... -S`) for every new function.
+- Heredocs still mangle backslash-n escapes inside asm strings in Python edit scripts: write
+  those scripts with the Write tool.
