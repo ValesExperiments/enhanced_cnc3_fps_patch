@@ -205,6 +205,22 @@ Fix or remove anything that turns out to be wrong.
 - **Per-call stepping systems** (TintEnvelope colour flashes, etc.) are
   called once per client frame from `Drawable_updateDrawable` (TW
   0x48353F). Check its callees for other "one step per frame" systems.
+- **Two "30 Hz-looking" effects the user chose to keep vanilla (B12/B13, 2026-10-12):**
+  - *Pre-rendered flipbooks* (`ImageSequence` in `Xml/GlobalData/
+    ImageSequences.xml`, e.g. repair/power icons: 10 images at 15/s): a
+    crossfade was tried; the user didn't like it.
+  - *Tiberium crystals*: MANUAL animation set by the logic module
+    `TiberiumCrystalBehavior::update` each tick. Easing it worked, but
+    `Shaders/Tiberium.fx` seeds the crystal's random glow from its first
+    bone's world position, so smooth motion re-rolls the glow every frame
+    (flicker). **Before smoothing any skinned model, grep its shader for
+    position-seeded randomness** (`GetRandomFloatValue`, `objectCenterWorld`).
+  Grep the XML first: `AnimationMode="MANUAL"` or `ImageSequence` tells you
+  which kind an effect is. Full RE notes are in docs/goals_detailed.md
+  (B12, B13).
+- **Quick signature prototyping:** `tools_and_docs_by_claude/sigscan/sigscan.py <script>` (venv python)
+  maps all four game builds with pefile and offers `find`, `calls_to` and
+  `hexdump`. It's much faster than iterating on the C resolver.
 - **Check "is it vanilla?" first.** The user is happy to test without the DLL
   at 30 FPS; the smoke pop and the shroud-return shadow blink both turned out
   to be vanilla. Ask early when a symptom might be stock behaviour.

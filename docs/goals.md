@@ -31,7 +31,9 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | F1 | (Nice to have) Support beyond 90 FPS: 120, 144, 160 and higher | **Works** for any 91–240 FPS; user runs 157 FPS with no stutter (2026-10-11) |
 | B10 | Dragging on the minimap should pan the camera smoothly | **Done**: game's steps lightly eased (18 ms); user: "the best version" (2026-10-11) |
 | B11 | Queued-order (Alt) waypoint lines should follow the unit smoothly | **Done** (confirmed 2026-10-12) |
-| F2 | Game stays at 100% speed at any frame rate (even ~10 FPS) | Implemented (`adaptive_fps=1`), **needs in-game test** |
+| F2 | Game stays at 100% speed at any frame rate (even ~10 FPS) | Working (`adaptive_fps=1`); user: "feels better" (round 7) |
+| B12 | Tiberium crystals should grow and shrink (when harvested) smoothly | **Closed, kept vanilla** (2026-10-12): smoothing worked, but made the crystal glow flicker; user chose vanilla |
+| B13 | The "breathing" repair / power-off icons on buildings should animate smoothly | **Closed, kept vanilla** (2026-10-12): crossfade tried and reverted; pre-rendered 15 images/s |
 
 ## Groundwork needed first
 
@@ -91,6 +93,12 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 - **B11:** The Alt waypoint lines start at the unit's logic position, which
   only updates with the game logic. During the line build the patch now
   uses the unit's smoothly drawn position instead.
+- **B12 / B13 (kept vanilla):** Tiberium growth is stepped by the game logic
+  (15×/s). Smoothing it worked, but the crystal shader picks a random glow
+  from the crystal's bone position, so a smooth animation made the glow
+  flicker every frame; the user preferred vanilla. The repair/power icons
+  are 10 pre-rendered images at 15/s; a crossfade didn't look good, so
+  they're vanilla too.
 - **F2:** The patch measured speed in frames, so a PC that couldn't hold the
   target ran the whole game slower. Now it measures each frame's work and,
   if needed, lowers the effective rate to what the PC can sustain, re-timing

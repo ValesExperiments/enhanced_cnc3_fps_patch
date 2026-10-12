@@ -849,6 +849,109 @@ rocket pods** have an abnormally fast idle animation.
 
 ---
 
+## B12. Tiberium crystals grow and shrink in steps
+
+**Status:** closed 2026-10-12, kept vanilla. The smoothing below worked
+("it animates correctly now"), but made the crystal glow flicker (see
+"Why it was reverted"); the user chose vanilla and the code was removed.
+
+### How it works in the game (TW 1.10 VAs)
+- Crystals (`Xml/Tiberium/TiberiumCrystal.xml`) use a `ScriptedModelDraw`
+  with `AnimationMode="MANUAL"` (TibCell01) and a `TiberiumCrystal` behavior
+  (`GrowthStages="3"`, `GrowthTimePerStage="3s"`).
+- `TiberiumCrystalBehavior::update` (0x5E607B, update-module vtable
+  0xA811EC slot 0) is a logic module. From the logic frame
+  (`[0xBEE574]+0x38`) it computes growth progress (stage / stages +
+  elapsed / duration / stages) or harvest progress, and hands the pair
+  (x, 1 − x) to two Drawable setters:
+  - 0x47281C: for each draw module (Drawable +0x184 list), interface
+    (+0xC8) → +0x6C(float). Three calls (0x5E6167, 0x5E61A8 = 0 at the end,
+    0x5E62CD).
+  - 0x472D74: for each draw module, +0x4C(float). On W3DScriptedModelDraw
+    this stores the value (+0x2F4) with the current client frame (+0x2F8).
+    Two calls (0x5E61B5 = 1.0 at the end, 0x5E62E7).
+  - A fourth caller of 0x47281C (0x5FA32F) is another behavior and is left
+    alone.
+- So the crystal animation moved once per logic update.
+
+### Fix (tried, removed)
+- The 5 setter calls go to `set_tiberium_anim/second`, which only record the
+  new value per Drawable (hash table, 2048 slots, rebuilt without idle
+  entries when 3/4 full). Gaps over 400 ms, jumps over 0.25 and new crystals
+  snap (the original setter is called at once).
+- `Drawable::updateDrawable` calls a per-frame helper with
+  `MOV ECX,ESI; CALL` (0x483645 → 0x4809DB). That call now goes to
+  `update_drawable_with_tiberium`: the original helper, then, for a Drawable
+  with an active tween, the eased value (from the last shown value to the
+  new one over the measured time between the last two updates, 10–200 ms)
+  through the original setters. Values are only written from the Drawable's
+  own update, so a crystal destroyed by harvesting is never touched.
+- The table is cleared at each session start.
+- Resolver `resolve_tiberium_sites`: both setters by signature, the update
+  function by its prologue, exactly 3 / 2 CALLs inside its first 0x300
+  bytes, and the updateDrawable site by the tint-envelope/Object-check
+  pattern. Verified on TW 1.10, TW 1.9, KW 1.03 and KW 1.02.
+
+### Why it was reverted
+- The "second" setter is not visual for crystals: on the W3D object it
+  snapshots the current transform (+0x2C4) with a blend weight (+0x2F4) and
+  stamps the client frame (+0x2F8); the draw (TW 0x850FFE) then lerps
+  snapshot → current transform (0x760DDA, position lerp + slerp) while
+  adding 1/30 per **client frame** up to 1. A static crystal never moves, so
+  this is invisible (but it is a client-frame-paced ramp, 5× fast at 156).
+- The brightening is the crystal shader's random glow
+  (`Shaders/Tiberium.fx`, "Random glow for tiberium crystals"): phase and
+  speed come from `GetRandomFloatValue(..., VertexColor.w * 255 +
+  (objectCenterWorld.x + objectCenterWorld.y) * 100)`, where
+  `objectCenterWorld` is the first bone's world position. Any bone movement
+  (tiny steps cross random-table bins) re-rolls the glow. In vanilla the
+  growth animation moves 15×/s, so the glow re-rolls 15×/s ("brighter in
+  small intervals"); smoothed, it re-rolled every frame and flickered.
+  Smooth growth and the vanilla sparkle rate are mutually exclusive.
+- Options offered: 30 updates/s, vanilla, or fully smooth. User chose
+  **vanilla** (2026-10-12).
+
+---
+
+## B13. Repair / power-off icons "breathe" in 15 Hz steps
+
+**Status:** closed 2026-10-12, kept vanilla. The crossfade below worked but
+the user didn't like the look ("they don't look that good"; 15 images/s is
+fine), so the code was removed.
+
+### How it works in the game (TW 1.10 VAs)
+- `Xml/GlobalData/UnitOverlayIconSettings.xml`:
+  `PowerIconImageSequence="PowerIconAnim"`,
+  `RepairIconImageSequence="RepairIconAnim"`. `ImageSequences.xml` lists 10
+  pre-rendered images each (`…0002` to `…0020`).
+- The settings live at `[0xBEAC48]` (+0x18 power, +0x1C repair sequence).
+  The building icon draw (0x4816BC) picks each sequence's current image with
+  0x46EA8B (EDI = sequence; returns the Image):
+  `i = (rate × GameClient frame / clientFPS) mod 2n`, mirrored on the way
+  back. `rate` is a global (0xB7EDAC) = **15 images per second**. The speed is
+  right at any FPS (it uses the client FPS global), but it only changes 15
+  times a second.
+- Each icon is drawn with `Display::drawImage` (W3DDisplay vtable 0xAC7E94
+  +0xE4 = 0x80F882: image, x0, y0, x1, y1, ARGB colour, mode) at one
+  `CALL [EDX+0xE4]` (0x481860), colour 0xFFFFFFFF, mode 2.
+
+### Fix (tried, removed)
+- Both picker calls go to a naked stub (`pick_overlay_icon_entry`: push EDI,
+  call C) that computes the position on the continuous 30 Hz client clock
+  (`g_retail_whole + g_retail_remainder / g_rate`), picks the same image as
+  the game and remembers the next one plus the blend fraction.
+- The draw call goes to `draw_overlay_icon` (fastcall = thiscall, pops 28
+  bytes): it draws the picked image (fading out over the second half of the
+  step) and then the next image on top (fading in over the first half), via
+  the colour's alpha, so one of them is always fully opaque.
+- With the patch inactive (target ≤ 30) the stock integer formula is used.
+- Resolver `resolve_overlay_icon_sites`: the picker by signature (its DIV
+  operand must be the client-FPS global), exactly 2 callers, and exactly one
+  `FF 92 E4 00 00 00` within 0x200 bytes after the second. Verified on all
+  four builds (rate 15 everywhere).
+
+---
+
 ## F2. 100% game speed at any frame rate
 
 **Status:** implemented 2026-10-12 (`adaptive_fps=1`, default on), needs an
@@ -1033,6 +1136,16 @@ per frame. Frames that take longer than 1/target therefore slow everything.
     160 or 164. With a 165 cap, target 138 or lower holds. Advice: no driver
     cap for this game (the mod limits itself), or a target ~15–20% under the
     cap.
+  - **In-game result (2026-10-12, TW 1.9, cap 156, ~6.5 min).** The user
+    said it "feels better". The cap was detected at 32 s (156 took 4.66 ms
+    per frame against 1.96 at 105) → ceiling 149, then 149 FPS at 100% for
+    90 s with no switches. Fights: 149 → 123 → 105 → back to 149 in 4 s.
+    The escalating late-game battle stepped 149 → 120 → 60 → 30 → 15 → 7 →
+    5 at 97–104% speed. At its peak (logic 800–900 ms/s, effects ~100 ms/s,
+    drawing ~45 ms/frame, ~36 ms even after the game ended) 5 FPS ran at
+    87–94%: nothing could hold 100% (a fixed 30 FPS ≈ 45%, 15 FPS ≈ 64%).
+    Open option: an `adaptive_min_fps` setting if the user prefers
+    smoothness over speed in such battles.
 - **Supported rates:** the target; above 90 any rate; 15–90 multiples of 15
   (the stock schedule needs whole frames per tick); below 15 any whole number,
   down to 5.
