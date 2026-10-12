@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - src_fps_patch/**
+      - src_multicore/**
       - scripts/**
       - Makefile
       - fps_patch.ini.example
@@ -13,6 +14,7 @@ on:
   pull_request:
     paths:
       - src_fps_patch/**
+      - src_multicore/**
       - scripts/**
       - Makefile
       - fps_patch.ini.example

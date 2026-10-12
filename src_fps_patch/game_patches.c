@@ -2,6 +2,7 @@
 
 #include "log.h"
 #include "memory_patch.h"
+#include "profiler.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -276,9 +277,12 @@ static void dispatch_counted(u8 *engine, u32 phase) {
     LARGE_INTEGER start;
     u32 after;
 
+    LONG zone = profile_enter(PROFILE_ZONE_LOGIC);
+
     QueryPerformanceCounter(&start);
     g_original_dispatch_logic_phase(engine, phase);
     g_frame_logic_us += microseconds_since(&start);
+    profile_leave(zone);
     if (phase == 1u && !logic_tick_running()) return;
     after = *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE);
     g_frame_phases += after >= phase ? after - phase + 1u : 1u;
@@ -810,10 +814,13 @@ static void THISCALL update_particles_at_retail_rate(void *manager) {
 
         g_particle_update_accumulator -= g_rate;
         ++g_particle_sim_tick;
+        LONG zone = profile_enter(PROFILE_ZONE_EFFECTS);
+
         QueryPerformanceCounter(&start);
         update(manager);
         g_frame_effects_us += microseconds_since(&start);
         ++g_frame_effects_steps;
+        profile_leave(zone);
     }
     /*
      * While particles are not simulated (e.g. the game is paused), drawing
@@ -1924,6 +1931,7 @@ static u32 STDCALL get_retail_limiter_interval(void *engine_pointer) {
     g_limiter_interval_remainder = scaled % divisor;
     if (interval == 0u) interval = 1u;
     log_frame_time_sample((u8 *)engine_pointer, interval, multiplier);
+    profiler_note_frame(g_rate);
     monitor_frame_pacing(interval);
     return repay_limiter_debt(interval);
 }
@@ -1948,9 +1956,12 @@ static u8 THISCALL update_audio_at_retail_rate(void *audio_manager) {
         LARGE_INTEGER start;
 
         g_audio_update_accumulator -= g_rate;
+        LONG zone = profile_enter(PROFILE_ZONE_EFFECTS);
+
         QueryPerformanceCounter(&start);
         result = g_original_audio_update(audio_manager);
         g_frame_effects_us += microseconds_since(&start);
+        profile_leave(zone);
     }
     return result;
 }

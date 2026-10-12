@@ -17,6 +17,9 @@ typedef struct Config {
     BOOL adaptive_fps;
     /* Diagnostic: trail-system draws to log (0 = off). */
     u32 debug_trail_draws;
+    /* Diagnostic: sample the main thread into fps_profile.log (src_multicore). */
+    BOOL profiler;
+    u32 profiler_report_seconds;
 } Config;
 
 void config_set_defaults(Config *config);

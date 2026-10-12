@@ -5,6 +5,7 @@
 #include "game_patches.h"
 #include "log.h"
 #include "memory_patch.h"
+#include "profiler.h"
 
 typedef struct Runtime {
     HMODULE self_module;
@@ -16,6 +17,7 @@ typedef struct Runtime {
     BOOL disabled;
     wchar_t ini_path[MAX_PATH];
     wchar_t log_path[MAX_PATH];
+    wchar_t profile_path[MAX_PATH];
 } Runtime;
 
 typedef int(THISCALL *RuntimeConfigThiscallFn)(void *original_this);
@@ -152,6 +154,34 @@ static BOOL apply_fixed_rate(Runtime *runtime) {
     return TRUE;
 }
 
+/* Diagnostic sampler (src_multicore); runs on the game's main thread once. */
+static void start_profiler(Runtime *runtime) {
+    static BOOL attempted;
+    ProfilerSetup setup;
+
+    if (attempted) return;
+    attempted = TRUE;
+    if (!wide_copy(runtime->profile_path, ARRAY_COUNT(runtime->profile_path),
+                   runtime->log_path) ||
+        !path_replace_filename(runtime->profile_path, ARRAY_COUNT(runtime->profile_path),
+                               L"fps_profile.log")) {
+        log_line("ERROR: profiler output path");
+        return;
+    }
+    setup.output_path = runtime->profile_path;
+    setup.game_module = runtime->game.module;
+    setup.game_image_size = runtime->game.pe_size_of_image;
+    setup.target_name = runtime->game.target_name;
+    setup.pe_timestamp = runtime->game.pe_timestamp;
+    setup.report_seconds = runtime->config.profiler_report_seconds;
+    if (profiler_start(&setup)) {
+        log_u32("Profiler started: fps_profile.log, report seconds=",
+                runtime->config.profiler_report_seconds);
+    } else {
+        log_line("ERROR: profiler could not start");
+    }
+}
+
 static void apply_from_game_hook(Runtime *runtime, const char *source) {
     if (!initialize_runtime_files(runtime)) return;
     log_text("Game hook reached: ");
@@ -164,6 +194,8 @@ static void apply_from_game_hook(Runtime *runtime, const char *source) {
     } else if (!apply_fixed_rate(runtime)) {
         runtime->disabled = TRUE;
         log_line("ERROR: disabling patch after live-state initialization failure");
+    } else if (runtime->config.profiler) {
+        start_profiler(runtime);
     }
 }
 

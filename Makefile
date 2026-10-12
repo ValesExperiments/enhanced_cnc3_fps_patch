@@ -13,7 +13,11 @@ SOURCES := \
 	src_fps_patch/proxy_dinput8.c \
 	src_fps_patch/dllmain.c
 
-HEADERS := $(wildcard src_fps_patch/*.h)
+# Multi-core research (profiler); built into the same DLL, off by default.
+MULTICORE_SOURCES := \
+	src_multicore/profiler.c
+
+HEADERS := $(wildcard src_fps_patch/*.h) $(wildcard src_multicore/*.h)
 
 COMMON_CFLAGS := \
 	-target $(TARGET) \
@@ -21,7 +25,8 @@ COMMON_CFLAGS := \
 	-Wall \
 	-Wextra \
 	-Werror \
-	-Isrc_fps_patch
+	-Isrc_fps_patch \
+	-Isrc_multicore
 
 COMMON_LDFLAGS := \
 	-target $(TARGET) \
@@ -36,7 +41,8 @@ MODE ?= release
 OBJDIR := zig-out/obj/$(MODE)
 BINDIR := zig-out/bin
 LIBDIR := zig-out/lib
-OBJECTS := $(patsubst src_fps_patch/%.c,$(OBJDIR)/%.obj,$(SOURCES))
+OBJECTS := $(patsubst src_fps_patch/%.c,$(OBJDIR)/%.obj,$(SOURCES)) \
+	$(patsubst src_multicore/%.c,$(OBJDIR)/multicore/%.obj,$(MULTICORE_SOURCES))
 
 ifeq ($(MODE),debug)
   CFLAGS := $(COMMON_CFLAGS) -O0 -g
@@ -76,7 +82,10 @@ $(OUTPUT): $(OBJECTS) src_fps_patch/dinput8.def $(LINK_DEPS) | $(BINDIR) $(LIBDI
 $(OBJDIR)/%.obj: src_fps_patch/%.c $(HEADERS) | $(OBJDIR)
 	$(ZIG) cc $(CFLAGS) -c $< -o $@
 
-$(OBJDIR) $(BINDIR) $(LIBDIR):
+$(OBJDIR)/multicore/%.obj: src_multicore/%.c $(HEADERS) | $(OBJDIR)/multicore
+	$(ZIG) cc $(CFLAGS) -c $< -o $@
+
+$(OBJDIR) $(OBJDIR)/multicore $(BINDIR) $(LIBDIR):
 	mkdir -p $@
 
 package: release

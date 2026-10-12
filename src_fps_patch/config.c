@@ -9,6 +9,8 @@ void config_set_defaults(Config *config) {
     config->debug_frame_times = 0;
     config->debug_trail_draws = 0;
     config->adaptive_fps = TRUE;
+    config->profiler = FALSE;
+    config->profiler_report_seconds = 60;
 }
 
 BOOL config_load(Config *config, const wchar_t *path) {
@@ -39,5 +41,9 @@ BOOL config_load(Config *config, const wchar_t *path) {
         L"fps_patch", L"debug_trail_draws", config->debug_trail_draws, path);
     config->adaptive_fps = GetPrivateProfileIntW(
         L"fps_patch", L"adaptive_fps", config->adaptive_fps, path) != 0;
+    config->profiler = GetPrivateProfileIntW(L"fps_patch", L"profiler", config->profiler, path) != 0;
+    config->profiler_report_seconds = GetPrivateProfileIntW(
+        L"fps_patch", L"profiler_report_seconds", config->profiler_report_seconds, path);
+    if (config->profiler_report_seconds < 5u) config->profiler_report_seconds = 5u;
     return TRUE;
 }

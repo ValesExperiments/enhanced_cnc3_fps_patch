@@ -28,6 +28,11 @@ Fix or remove anything that turns out to be wrong.
   project, still research only: see `docs/multicore.md` and
   `docs/multicore_detailed.md`. The user's recent test logs come from
   **TW 1.9**, which is *not* Large Address Aware (TW 1.10 and KW are).
+- **Profiler (2026-10-12):** `profiler=1` makes the DLL write
+  `fps_profile.log` (src_multicore/profiler.c). Turn RVAs into names with
+  `tools_and_docs_by_claude/profiler_report/analyze.py --map
+  maps/functions_<build>.tsv`. Maps exist for TW 1.10 and KW 1.03 only;
+  ask for TW 1.10 profiling runs (TW 1.9 isn't in Ghidra).
 - `sed -i` in Git Bash rewrites CRLF files as LF. Restore CRLF afterwards,
   or edit with Python in binary mode.
 

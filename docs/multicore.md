@@ -6,7 +6,9 @@ lows by using more CPU cores. Details and sources are in
 
 ## Where we stand (2026-10-12)
 
-**Research done, no code yet.** Code will live in `src_multicore/`.
+**Research done; the profiler (option 1) is built and waiting for a test
+battle.** Code lives in `src_multicore/`. Turn it on with `profiler=1` in
+`fps_patch.ini`; it writes `fps_profile.log`.
 
 ## What we know
 

@@ -103,7 +103,40 @@ SAGE ancestor, so hot spots are likely similar but unconfirmed for CnC3):
 
 ## 5. Options in detail
 
-### A. Profiler (prerequisite)
+### A. Profiler (prerequisite) — built 2026-10-12
+
+**Implementation** (`src_multicore/profiler.c`, compiled into dinput8.dll):
+- `profiler=1` / `profiler_report_seconds=60` in fps_patch.ini. It starts
+  once, from the game-hook path on the main thread, after the patch
+  installs.
+- A time-critical sampler thread wakes every ~1 ms (high-resolution
+  waitable timer; `Sleep(1)` fallback). For each sample it does
+  `SuspendThread` → `GetThreadContext(CONTEXT_CONTROL)` → copies 4 KB of
+  stack above ESP → `ResumeThread`. Nothing allocates or locks while the
+  thread is suspended.
+- Zones: the patch sets `g_profile_zone` to LOGIC around every logic
+  dispatch (`dispatch_counted`) and to EFFECTS around the 30 Hz particle
+  and audio steps. Everything else is CLIENT (drawing, UI, limiter waits).
+- Per window it records:
+  - exclusive instruction RVAs per zone;
+  - inclusive RVAs: the instruction plus every stack value that is a game
+    return address (preceded by a CALL; stale values make this an upper
+    bound);
+  - the first game return address when the instruction is in another
+    module ("ext": who called into DXVK/ntdll);
+  - samples per module and zone;
+  - per-thread CPU time (`GetThreadTimes`, start address via
+    `NtQueryInformationThread` class 9);
+  - frames and rate.
+- Self-test (`temp/profiler_test`): ~650 samples/s, sampler cost ~3% of a
+  core, zones and call sites attributed correctly, no deadlocks.
+
+**Analysis:** `tools_and_docs_by_claude/profiler_report/analyze.py
+fps_profile.log --map maps/functions_TW_1.10.tsv [--windows a-b]`. Function
+maps are exported from Ghidra for TW 1.10 and KW 1.03 (TW 1.9 isn't imported
+into Ghidra yet).
+
+**Original plan:**
 - A background thread in our DLL samples the main thread's EIP ~1000×/s
   (`SuspendThread` / `GetThreadContext` / `ResumeThread`) and builds a
   histogram by function. It tags each sample with "inside a logic phase" /
