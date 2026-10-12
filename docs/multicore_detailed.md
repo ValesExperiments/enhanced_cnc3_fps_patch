@@ -475,6 +475,241 @@ spot.
   3 query calls, the table from the query's `PUSH [EAX*4+table]`, and the
   add call from its 14-byte prefix in the walk. Verified on all four builds.
 
+**M4 measurement** (2026-10-12, TW 1.9 modded, 7 AIs, `temp/profile6/`; "Range
+queries" lines, per 60 s window):
+- **Volume:** ~8,800 queries/s early, then **42,000–49,000 queries/s** in the
+  battle (~3,000 per logic tick). **136–155 ms/s** inside queries, ~15% of
+  the main thread.
+- **Size:** ~290 candidates tested per query, **~6 accepted** (98% rejected).
+  ~99% of queries are in the 129–512-candidate bucket; queries over 512
+  candidates are rare (~0.1%, ~6 ms/s). The average query takes ~3 µs.
+- **Callers** (1.9 RVAs, battle windows):
+
+| Caller | Queries/s | ms/s | Candidates | Accepted |
+|---|---|---|---|---|
+| `0x33D3EC` (weapon nuggets, `0x73D306`) | ~12,000–15,000 | 57–70 | ~290 | ~7 |
+| `0x2FAEFE` (AttributeModifierNugget, `0x6FAEA1`) | ~16,000–21,000 | 40–50 | ~295 | ~9 |
+| `0x2E9130` (PassiveAreaEffectBehavior, `0x6E9027`) | ~13,000–14,000 | ~29 | ~305 | **0** |
+
+**Conclusions:**
+- **Option B (split queries over cores) is ruled out.** Queries are tiny
+  (~3 µs); a thread hand-off costs about as much as the query.
+- **Option A (pre-check) is the only exact lever.** It would need a safe
+  bound on each candidate's radius without its geometry virtual call. A
+  global maximum radius is too loose (structures and big units). A
+  per-tree-level bound needs the partition's insert rules (unverified), and
+  per-entry caches need invalidation. The cost per candidate is already
+  ~11 ns (13 M candidates/s), mostly memory, so even a good pre-check might
+  save a third of the query time (~5% of the main thread).
+- The quadtree's structure (and so its result order) must not change: logic
+  iterates results in order (damage application, kill credit).
+- PassiveAreaEffectBehavior queries ~13,000 times a second and accepts
+  nothing. Its filter rejects every candidate. Skipping it exactly would
+  need proof that no object can ever pass the filter.
+
+**M4 attempt (2026-10-12, after M2-lite was rejected; the user chose to try
+M4 as the last multicore step):**
+
+*Facts found (TW 1.10, verified):*
+- Distance modes in the 5-entry table:
+
+| Mode | Function | What it does |
+|---|---|---|
+| 0 | `0x9E20F3` | center d², no virtual call |
+| 1 | `0x9E2113` | 2D: rejects if `dx²+dy² − (r_geom(+0x10) + r)² > 0`, in SSE single precision |
+| 2 | `0x9E218C` | center 3D d², no virtual call |
+| 3 | `0x9E21B8` | 3D sphere: r_geom +0x14, z offset +0x20 |
+| 4 | `0x9E3345` | mode 3, then an exact geometry test |
+
+- Partition node (0x30 bytes, `new` in `0x9E29A2`): +4 interface ("thing"),
+  +0x10 back link, +0x14 next in cell, +0x18/+0x1C dirty-list links, +0x20
+  tree, +0x24 level mask, +0x28/+0x2C cell. Thing: slot 0 = geometry, slot 2
+  = getObject, +4 → position.
+- Insert `0x9E271B` / placement `0x9E224B` store a node in the smallest
+  aligned quadtree cell containing its `pos ± r_geom` box. Phase 2's update
+  `0x9E2920` re-places only nodes on the dirty list. Cell coordinates clamp
+  at the map edge.
+  - A radius bound per level ("r ≤ cell/2") is therefore not guaranteed
+    between a change and the next phase 2, nor at map edges.
+  - So a **pre-check could reject something the original accepts**
+    (desync); it was dropped.
+- The walk `0x9E234A` (thiscall, 11 arguments, RET 0x2C) is byte-identical
+  in all four builds apart from 3 relocated operands (the 0.5 constant, the
+  filter call `0x9DFDB9`, the add call `0x9E1DE5`). The query calls it twice.
+  It visits children (low x, low y), (high x, low y), (low x, high y), then
+  (high x, high y) as a loop.
+- Where a callback's time goes (heavy 1.9 profile, per instruction): the
+  thing's vtable load, the position load, and the geometry load each cost
+  about a third.
+
+*What was built and tested:*
+- `src_multicore/range_walk.c`: an exact C copy of the walk with prefetching,
+  config `multicore_range_walk`, and a verify mode (the original adds, the
+  copy records, results compared bit for bit).
+- Resolver fields `walk_function`, `walk_calls[2]`, `filter_function`;
+  layout check OK on all four builds.
+- **Offline equivalence test** (`temp/range_walk_test/test.c`): the game's
+  own walk machine code (relocated into a test process) against the copy.
+  - Setup: random quadtrees; NaN and edge values; null objects; filters;
+    both query modes; lists changed mid-query.
+  - Result: **200,000 scenarios, 9.8 M events, 2.0 M results, 0
+    differences.**
+  - Two deliberately broken copies were caught (76,325 and 20,289 failing
+    scenarios).
+- **Speed** (`temp/range_walk_test/bench.c`, ~200 MB scattered partition,
+  ~143 objects per query), copy ÷ original:
+
+| Variant | Copy ÷ original |
+|---|---|
+| Batched prefetch | 1.18–1.22 (slower) |
+| Plain copy | 0.98–0.99 |
+| Prefetch one node ahead | 0.98 |
+| Prefetch two nodes ahead | 0.95 |
+
+*Conclusion:* the CPU's out-of-order execution already overlaps the walk's
+misses (the next-node load doesn't depend on the previous object's work).
+The best exact variant saves ~5% of the walk, **under 1% of the main thread**
+in heavy battles: not measurable in a game. An exact pre-check is not
+possible without the radius guarantees above. M4 has no worthwhile exact
+lever. **The user chose to remove the code (2026-10-12).** The copy, the
+test and the benchmark are kept in `temp/range_walk_test/` (README there).
+The M4 diagnostic `range_stats.c` (profiler only) stays.
+
+## 4j. M2-lite: logic beside the 3D render (started 2026-10-12)
+
+M4 is parked (see §4i). Design A′ from §4d: run the frame's logic batch on a
+worker thread during the 3D part of the draw, and join before the UI draws.
+
+**The render window, mapped** (TW 1.10; the same code in TW 1.9 at
+`0x4A391B`):
+- `0x83B400` (W3DDisplay draw): begin-render `0x747A7C`, particle manager
+  update (`*0xBF4DD8` slot 0x14), optional `0x83DFA5`, then `0x839FB3`, then
+  end-render `0x74D5B4`.
+- `0x839FB3`, in order:
+  1. shadow-map render `0x860722`: a render target cleared to white,
+     then the casters;
+  2. `0x837903`, `0x818EDE`;
+  3. Begin_Render `0x73948C`;
+  4. 3D scene `0x80611E` (camera → scene +0x120, slot 0x30), then
+     `0x818F09`, `0x459457`, `0x483C51`, `0x46E0EF`×3, `0x46DFE6`,
+     `0x47137B`;
+  5. **UI layers:** `*0xBE6C5C` slot 0xA0, GameClient slot 0x30, Apt slot
+     0x30, and others;
+  6. end-scene `0x73DC51(1)`, which flushes the sorting renderer (alpha
+     geometry).
+- Steps 1–4 are pure W3D drawing; they are the overlap window. The UI
+  (step 5) reads logic state (health, queues, money), so logic must be
+  finished before it.
+
+**Size** (heavy TW 1.9 profile `temp/profile6`, inclusive, upper bound):
+
+| Minute | FPS | Logic | Whole draw | Scene function | Shadow map | 3D scene | End-scene |
+|---|---|---|---|---|---|---|---|
+| 2 | 146 | 14% | 22% | 21% | 3% | 7% | 4% |
+| 3 | 123 | 40% | 37% | 32% | 9% | 8% | 8% |
+| 4 | 41 | 49% | 31% | 22% | 9% | 9% | – |
+| 5 | 12 | 68% | 15% | 9% | 3% | 5% | – |
+
+- The window (shadow map + 3D scene + passes) is about **20% of the main
+  thread in the 40–120 FPS stage** and ~10% in the heaviest minutes.
+- When logic is at least as long as the window, the frame shrinks by the
+  window: about +25% FPS in the middle stage and about +10% at the
+  heaviest. Frames without a logic phase (more than 6 frames per tick)
+  gain nothing.
+
+**Thread-level checks (TW 1.10):**
+- FPU: `GameLogic_UpdatePhase` calls `0x9DE157` (`_fpreset`, then 24-bit
+  precision, round to nearest). Other code uses a scoped 53-bit guard
+  (`0x7EF719` / `0x7EF753`). A worker must copy the main thread's x87
+  control word and MXCSR before each batch.
+- TLS: the static TLS directory isn't read by game code (no `FS:[0x2C]`).
+  `TlsGetValue` holds only the game's own thread object (`0x8C68A8`, set by
+  the thread-start wrapper `0x8C55D0`); it is benign.
+- CRT per-thread state: `rand` (16 callers) is used for setup and ID
+  strings (`0x69A71A`, `0x5B50A0`), not seen in tick logic (the logic RNG
+  is `0xB84DD0`). The remaining callers still need checking before
+  release. `strtok` is used for INI parsing at load time.
+- Stack: the main thread reserves 1 MB. The worker will get 2 MB.
+
+**Scheduler integration:** `dispatch_logic_phase_scheduled` currently picks
+the frame's batch when `GameEngine_update` dispatches (after the draw). With
+M2-lite, the same decision moves to the window start, and the later
+dispatch only joins. The client-slice flush `0x5E2C1B` (pending
+Object→Drawable updates) runs at the join.
+
+**Static audits (two parallel audits, key claims re-checked by hand, TW 1.10):**
+
+*What the render window reads (the window is not logic-free):*
+- `0x812DE2` runs for every visible render object in all three scene passes
+  (shadow `0x860722`, water reflection `0x837903` → `0x8188A5`, main
+  `0x80611E`):
+  - it follows Drawable+0x140 to the **Object** and calls its shroud status
+    `0x5E1264` → `0x9E10C1` (verified);
+  - that call **fills a per-player shroud cache** in the Object's partition
+    data (+0x24, +0x74, and the sticky "seen" byte +0xC4), and can fire
+    ghost-object snapshot/free callbacks that add or remove scene objects;
+  - logic reads the same cache (`0x5E1264` has 17 other callers), so a
+    race could leave a stale value for logic: a **desync risk**.
+- Other Object reads in the window:
+  - the visibility pass `0x831A35` reads Object +0x80/+0xB4/+0xC8/+0x3C0/
+    +0x3CD and template flags;
+  - the occluder pass `0x8130B1` reads team → player → colour;
+  - the Drawable icon pass `0x483C51` (health bars, group numbers) makes
+    heavy Object and module walks.
+- Projected shadow decals `0x858E6B` run a **partition range query**
+  (quadtree walk), which conflicts with logic's phase-2 partition update.
+- The W3D shroud texture upload walks a dirty-cell `std::set` that logic's
+  shroud observer (`0x8316E9` → `0x82CC7D`) inserts into.
+
+*What logic writes into the client:*
+- `RenderObjClass::Set_Transform` `0x745429` (and Set_Position `0x745464`)
+  calls the scene's Register (slot 0x38) on every transform change of an
+  robj that is in the scene (verified). Every unit move (`0x66FC70` →
+  `0x4748D6` → W3DModelDraw slot 0xB8 `0x851286`) therefore writes an
+  unlocked scene list that the render's visibility pass empties.
+- **Model-state read-backs** (verified `0x4787F2`; also `0x47889D`,
+  `0x474956`):
+  - if a model state is pending, these run the draw-module model swap
+    synchronously (a new robj and a scene add), then ask the draw modules
+    for **gameplay** data (launch offsets, used by `0x5E1EC7`);
+  - pristine bones `0x472AAA` (15 logic callers) can create robjs and load
+    assets, using a static scratch buffer;
+  - model-state changes therefore can't simply be deferred.
+- Per-shot paths return handles the caller uses at once, so they can't be
+  queued: particle-system creation `0x5BE5E6`, Drawable creation `0x674F88`
+  (projectiles, lasers), audio `0x800611`.
+- Object/Drawable destruction: the render dereferences Drawable+0x140, so
+  frees must wait for the join.
+- Also: tread marks, a terrain-mask vertex-buffer rebuild for large
+  templates (D3D), FX nuggets (scorch, light pulse, decal, camera shake),
+  ghost objects, and TerrainVisual.
+- The D3D device is created **without** MULTITHREADED (`0x75662A`: 0x40/0x20,
+  optional 0x10). Several of these paths load assets or touch D3D. The engine
+  serialises them with its own DirectX mutex `0xBFDE54` (`0x7479DE` /
+  `0x74D5B4`), which `0x83B400` holds for the whole render.
+
+**Verdict (2026-10-12): M2-lite as designed is not viable at acceptable risk.**
+- A safe version needs about 12 families of interception points in each of
+  the four builds:
+  - a deferral queue (transform pushes, tread marks, FX, flags, flush);
+  - a wait-for-render lock (Drawable create/destroy, particle creation,
+    ghosts, terrain, asset loads);
+  - deferred Object frees;
+  - a render-side shroud-status precompute;
+  - moving the icon pass after the join.
+- The per-shot paths need the lock, so in a battle the worker would wait for
+  the render at its first shot. The overlap would collapse exactly in the
+  battles it is meant for.
+- The model-state read-backs and the shroud cache add desync risk on top of
+  the crash risk.
+
+**Other levers rechecked** (heavy minutes 4–5, `temp/profile6`):
+- Logic is 58–68% of the main thread and spread thin: no function above 1.5%
+  apart from the range-query trio (~7% exclusive).
+- The largest call site into ntdll is the limiter's idle wait (`0x62EBA3`,
+  9.1%). Allocator and lock calls are each under 1.5%, so an allocator
+  replacement is not a big lever either.
+
 ## 5. Options in detail
 
 ### A. Profiler (prerequisite) — built 2026-10-12

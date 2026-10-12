@@ -7,7 +7,9 @@ Goals:
 - Keep the frame rate high in intense battles.
 - Improve the 1% and 0.1% lows.
 
-Status: research phase. Findings are in `docs/multicore.md` (summary) and
+Status: **closed (2026-10-12).** M1, M1b and M3a are in the DLL. M2-lite
+(logic beside the render) and M4 (range searches) were researched and
+dropped. Findings are in `docs/multicore.md` (summary) and
 `docs/multicore_detailed.md` (details).
 
 ## Files

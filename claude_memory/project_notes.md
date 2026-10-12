@@ -34,6 +34,24 @@ Fix or remove anything that turns out to be wrong.
   beside the scene render only; full logic threading is infeasible, because
   logic writes Drawables directly, see docs §4d) → M4 range queries. The
   status is in `docs/multicore.md`.
+  **M4 measured (2026-10-12, heavy 1.9):** ~45,000 range queries/s, each tiny
+  (~3 µs, ~290 candidates, ~6 accepted), ~15% of the main thread. Splitting
+  queries over cores is useless at that size; only an exact pre-check is left.
+  Query result order must never change (logic iterates it in order).
+  **M2-lite rejected (2026-10-12)** after two static audits (docs §4j): the 3D
+  render reads live Objects and fills logic's shroud cache (`0x812DE2` →
+  `0x9E10C1`). Every robj Set_Transform writes an unlocked scene list. Logic
+  reads draw-module state back (`0x4787F2`). The D3D device is not
+  MULTITHREADED. Don't retry logic/render threading without a new idea.
+  **M4 closed (2026-10-12):** an exact C copy of the range-query walk with
+  prefetching was proven identical offline (the game's own walk machine code
+  run in a test process, `temp/range_walk_test/`), but the CPU's
+  out-of-order engine already overlaps those misses: at best 0.95× the time.
+  Removed at the user's choice. **Lesson:** benchmark a prefetch/memory idea
+  offline against the original machine code *before* wiring it into the DLL.
+  The multi-core project is closed.
+  **Subagents can share the Ghidra MCP server**, but heavy parallel use once
+  dropped the connection; a retry worked.
   **Profiler trick:** if all of one function's samples land on a single
   instruction, look at the load just before it. M3a found a CPU read *from a
   locked GPU vertex buffer* this way (trail builder, 7–11% of the frame). Check

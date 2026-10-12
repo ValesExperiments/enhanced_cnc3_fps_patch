@@ -44,9 +44,9 @@ First profile, busiest minutes:
   several cores is therefore not realistic.
 - DXVK already moves the Direct3D work to its own thread. More DXVK settings
   won't help.
-- TW 1.9 (the version the user plays) is **not Large Address Aware**: it can
-  only use 2 GB of memory. TW 1.10 and Kane's Wrath are. That causes memory
-  crashes, not lag.
+- TW 1.9 (the version the user plays) was not Large Address Aware (2 GB
+  limit; memory crashes, not lag). The user patched it to 4 GB on
+  2026-10-12. TW 1.10 and Kane's Wrath already were.
 
 ## Roadmap (agreed with the user 2026-10-12, reordered the same day)
 
@@ -57,6 +57,16 @@ locks. Only a lighter version (logic beside the 3D scene render) is
 realistic, and it's high risk. The user chose: M3 first, then M2-lite,
 then M4.
 
+Outcome so far: the profiler-driven single-core fixes (M1, M1b, M3a) gave
+the big win (a heavy battle went from ~67% to ~100% game speed). M2-lite was
+researched in depth and **rejected**: the
+3D render reads (and even writes) live game objects, and logic changes the
+render's lists on every unit move and shot, so it would crash or desync
+without dozens of risky patches. M4 was measured, then tried as an exact
+faster copy of the search: proven identical, but under 1% faster, so it was
+removed. **The multi-core project is closed (2026-10-12)**; M1, M1b and M3a
+stay in the DLL.
+
 Every step must work on TW 1.10, TW 1.9, KW 1.03 and KW 1.02.
 
 | Step | What | Expected gain (heavy battle) | Status |
@@ -65,8 +75,8 @@ Every step must work on TW 1.10, TW 1.9, KW 1.03 and KW 1.02.
 | M3a | Trail drawing: stop reading a value back from GPU memory for every trail point (found by the profiler: it *was* the whole trail cost) | ~7% light games, ~11% heavy | **done** (gone from the profile) |
 | M1b | A particle effect's first draw: look only at effects of its own kind instead of the whole list | ~3% heavy | **done**: 0 mismatches, 0 split groups |
 | M3 | Remaining particle work on other cores (CPU particle steps, particle drawing) | at most ~6% heavy (the whole effects zone is 6.6%, spread thin) | **closed** (user, 2026-10-12) |
-| M2 | Game logic beside the 3D scene render ("M2-lite") | ~10–15% (~25–30% in light games), high risk | after M3 |
-| M4 | Faster "find objects near me" range searches (results must stay identical) | ~9.5% heavy (search code) + callers | **investigated**: no algorithmic bug; options in multicore_detailed.md §4i |
+| M2 | Game logic beside the 3D scene render ("M2-lite") | would have been ~+25% FPS mid-battle, ~+10% at the heaviest | **researched, not viable**: the 3D render reads and even writes live game objects, and logic changes the render's lists on every move and shot (details in multicore_detailed.md §4j) |
+| M4 | Faster "find objects near me" range searches (results must stay identical) | ~15% heavy in total (~45,000 tiny searches/s) | **closed**: splitting over cores ruled out (searches too small). A pre-check could change results (desync risk). An exact faster copy was built and proven identical, but it was <1% faster, so it was removed (details in multicore_detailed.md §4i) |
 
 ## Options, best first
 
