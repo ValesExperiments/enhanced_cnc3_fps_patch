@@ -1139,6 +1139,43 @@ GDI missile soldiers in mission 1).
 
 ---
 
+## B21. Turrets shake back and forth while moving
+
+**Status:** fix implemented 2026-10-12, needs an in-game test.
+
+**Report:** every TurretAI vehicle and base defence (e.g. Predator, missile
+batteries) shakes rapidly while moving, on TW 1.10 and 1.9 with the patch.
+Not at 30 FPS without the DLL. The bisect with all switchable features off
+still shook. The user's idea, B18, was right: B18 is part of the scheduler
+core, which can't be switched off.
+
+**Cause (TW 1.10 `0x8580A2`, W3D turret positioning, turn bone +0x14 and
+pitch bone +0x18):**
+- It reads `s = GameEngine+0x48`.
+- `if (s == 1.0)` it shifts each turret's angle history (prev = cur,
+  cur = logic angle) and draws prev; otherwise it draws
+  `prev + wrap(cur − prev)·s`. So the history only advances on a frame
+  where s is **exactly 1.0**.
+- `j / F` gave that on every tick's last frame. B18's continuous
+  `(15j − carry)/rate` almost never does, so the history went stale and
+  turrets swept between old angles and snapped back every tick.
+- It's the only user of `+0x48` that compares it for equality. The other
+  six readers (positions, transforms, transition, UI progress, two draw
+  helpers) use it as a factor.
+
+**Fix `turret_fraction`:**
+- The function's `MOV EAX,[engine]` (5 bytes, followed by
+  `MOVSS XMM0,[EAX+0x48]`; EAX is overwritten right after) becomes
+  `MOV EAX, imm32` pointing at our `g_turret_engine_view`.
+- Every write of the fraction (`write_interpolation`, from both the
+  continuous scheduler path and the stock-schedule path) also writes the
+  view: the same value, except **exactly 1.0 on a tick's last frame**. So
+  turrets get the old once-per-tick shift, and everything else keeps the
+  even steps.
+- Resolver: a unique signature, and the operand must equal the resolved
+  engine pointer. Verified on all four builds.
+- Depends on `phase_scheduler` (which writes the view).
+
 ## B19 / B20. One-frame glitches: aircraft in the air, build icons gone
 
 **Status:** diagnosing (2026-10-12).
@@ -1339,7 +1376,8 @@ Firestorm, 155 FPS, Orca Fighter at the GDI airfield):**
   is easy to miss. At 155 FPS it's ~10 frames. After that the Orca is
   hidden inside the opening pad (screenshot 3).
 
-**Fix `teleport_snap` (implemented, needs a test):**
+**Fix `teleport_snap` (confirmed in-game 2026-10-12: the Orca flash is
+gone, and teleporting units look fine):**
 - An entry hook on `Drawable::refreshInterpolationHistory` (TW 1.10
   `0x474EAF`, thiscall(snap), RET 4, prologue `55 8B EC 83 EC 0C`; KW 1.03
   `0x4BAB25`, thiscall(snap, force), RET 8, prologue `55 8B EC 51 51`).

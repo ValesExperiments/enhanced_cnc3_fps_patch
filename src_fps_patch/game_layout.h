@@ -80,6 +80,16 @@ typedef struct AptCallLayout {
     u32 variable_function;
 } AptCallLayout;
 
+typedef struct TurretFractionLayout {
+    /*
+     * B21: the W3D turret positioning (TW 1.10 VA 0x8580A2) loads the
+     * engine's interpolation fraction (MOV EAX,[engine]; MOVSS XMM0,
+     * [EAX+0x48]) and advances its per-turret angle history only when the
+     * fraction is exactly 1.0. RVA of that 5-byte MOV EAX,[engine].
+     */
+    u32 engine_load;
+} TurretFractionLayout;
+
 typedef struct HistoryRefreshLayout {
     /*
      * B19: Drawable::refreshInterpolationHistory (TW 1.10 VA 0x474EAF,
@@ -484,6 +494,7 @@ typedef struct GameLayout {
     RangeQueryLayout range_query;
     AptCallLayout apt_calls;
     HistoryRefreshLayout history_refresh;
+    TurretFractionLayout turret_fraction;
 } GameLayout;
 
 typedef enum GameResolveResult {

@@ -2020,6 +2020,22 @@ static BOOL resolve_frame_boundary_sites(
            module[game->frame_boundary.function + 42u] == 0x40u;
 }
 
+/* Turret positioning: MOV EAX,[engine]; MOVSS XMM0,[EAX+0x48]; MOV EAX,[EDI+0xC]; ... */
+static const u16 g_turret_fraction_pattern[] = {
+    0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xF3, 0x0F, 0x10, 0x40, 0x48,
+    0x8B, 0x47, 0x0C, 0x8B, 0x98, 0x40, 0x01, 0x00, 0x00, 0x85, 0xDB, 0xF3, 0x0F, 0x11, 0x45, 0xEC
+};
+
+static BOOL resolve_turret_fraction_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    u32 engine;
+
+    return FIND_UNIQUE(module, nt, g_turret_fraction_pattern, &game->turret_fraction.engine_load) &&
+           read_absolute_rva(module, game->pe_size_of_image,
+                             game->turret_fraction.engine_load + 1u, &engine) &&
+           engine == game->timing.game_engine_pointer;
+}
+
 /* Drawable::refreshInterpolationHistory: TW (1 argument) and KW (2 arguments) shapes. */
 static const u16 g_history_refresh_tw_pattern[] = {
     0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x0C, 0x53, 0x8B, 0xD9, 0x80, 0x8B, 0x44, 0x01, 0x00, 0x00, 0x80,
@@ -2385,6 +2401,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_range_query_sites(module, nt, &game) ||
         !resolve_apt_call_sites(module, nt, &game) ||
         !resolve_history_refresh_sites(module, nt, &game) ||
+        !resolve_turret_fraction_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

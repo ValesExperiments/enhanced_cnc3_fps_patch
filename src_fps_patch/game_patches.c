@@ -285,12 +285,28 @@ static u32 scheduled_phases_done(u32 frame, u32 frames) {
  * (the remainder before this tick, in fifteenths). Every frame then advances
  * exactly 1/R, across tick boundaries too, and the value stays in (0, 1].
  */
+/*
+ * B21: the W3D turret positioning advances each turret's angle history
+ * only on a frame whose fraction is exactly 1.0 (as j / F gave on a tick's
+ * last frame); with the continuous fraction that almost never happened, so
+ * turrets swept between stale angles and snapped back every tick (shaking
+ * while moving). Its load of the engine pointer now reads this view instead,
+ * whose +0x48 is the same fraction except exactly 1.0 on a tick's last frame.
+ */
+static float g_turret_engine_view[ENGINE_LOGIC_PHASE_INTERPOLATION / sizeof(float) + 1];
+
+static void write_interpolation(u8 *engine, float fraction, BOOL tick_end) {
+    *(float *)(engine + ENGINE_LOGIC_PHASE_INTERPOLATION) = fraction;
+    g_turret_engine_view[ENGINE_LOGIC_PHASE_INTERPOLATION / sizeof(float)] =
+        tick_end ? 1.0f : fraction;
+}
+
 static void write_tick_interpolation(u8 *engine) {
     float fraction = (float)((i32)(LOGIC_FPS * g_tick_frame) - (i32)g_tick_carry) / (float)g_rate;
 
     if (fraction < 0.0f) fraction = 0.0f;
     if (fraction > 1.0f) fraction = 1.0f;
-    *(float *)(engine + ENGINE_LOGIC_PHASE_INTERPOLATION) = fraction;
+    write_interpolation(engine, fraction, g_tick_frame >= g_tick_frames);
 }
 
 static BOOL logic_tick_running(void) {
@@ -468,7 +484,7 @@ static void THISCALL update_phase_interpolation(void *engine_pointer) {
     }
 
     if (interpolation > 1.0f) interpolation = 1.0f;
-    *(float *)(engine + ENGINE_LOGIC_PHASE_INTERPOLATION) = interpolation;
+    write_interpolation(engine, interpolation, FALSE);
 }
 
 /*
@@ -2560,6 +2576,22 @@ static void install_teleport_snap(PatchInstaller *installer) {
     }
 }
 
+/* B21: the turret positioning reads g_turret_engine_view (see write_interpolation). */
+static void install_turret_fraction(PatchInstaller *installer) {
+    u32 rva = g_game->turret_fraction.engine_load;
+    u8 expected[5];
+    u8 load_view[5] = { 0xB8, 0, 0, 0, 0 }; /* MOV EAX, imm32 */
+
+    memcpy(expected, game_address(g_game, rva), sizeof(expected));
+    if (expected[0] != 0xA1) {
+        installer->ok = FALSE;
+        return;
+    }
+    encode_u32(&load_view[1], (u32)(uintptr_t)g_turret_engine_view);
+    patch_bytes(installer, "turret interpolation fraction load", rva, expected, load_view,
+                sizeof(load_view));
+}
+
 static void install_apt_call_counter(PatchInstaller *installer) {
     static const u8 prologue[6] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20 };
     static void (*const stubs[APT_CALL_FUNCTIONS])(void) = {
@@ -4410,6 +4442,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     INSTALL_FEATURE(apt_call_counter);
     INSTALL_FEATURE(spawn_logger);
     INSTALL_FEATURE(teleport_snap);
+    INSTALL_FEATURE(turret_fraction);
     INSTALL_FEATURE(drawable_interpolation_window);
     INSTALL_FEATURE(particle_and_cursor_timing);
     INSTALL_FEATURE(phase_scheduler);

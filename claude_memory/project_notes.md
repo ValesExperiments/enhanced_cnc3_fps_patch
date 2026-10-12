@@ -367,3 +367,9 @@ Fix or remove anything that turns out to be wrong.
   (`zig cc ... -S`) for every new function.
 - Heredocs still mangle backslash-n escapes inside asm strings in Python edit scripts: write
   those scripts with the Write tool.
+- **Interpolation fraction consumers (B21, 2026-10-12):** `GameEngine+0x48` has 7
+  readers in TW 1.10. The W3D turret positioning (`0x8580A2`) tests it for *exactly
+  1.0* to advance turret history once per tick. Any change to how the fraction is
+  produced must keep an exact 1.0 on each tick's last frame for turrets
+  (`g_turret_engine_view`). Bisect switches can't disable core scheduler code, so
+  consider recent core changes when a bisect comes up empty.
