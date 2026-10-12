@@ -343,3 +343,19 @@ Fix or remove anything that turns out to be wrong.
 - **Lesson (B17):** when wrapping a stock draw/update, mirror the stock code's
   *virtual casts and guards* (e.g. particle storage slot 0x2C "as trail", 0x28
   "as swarm"). Mods pair modules in combinations vanilla never uses.
+- **Reading a mod's compiled data (2026-10-12):** mods ship one `.big` (BIG4,
+  big-endian table) whose `data\mod.manifest/.bin/.relo` hold compiled assets
+  (no XML; names only in the manifest). Scripts: `temp/firestorm/big_list.py`,
+  `big_extract.py`, `manifest.py` (version 5: 48-byte header, 44-byte entries,
+  instance data concatenated in entry order). FXParticleSystemTemplate type =
+  dword at instance +0x10 (1 CPU, 2 DRAWABLE, 3 STREAK/LIGHTNING, 5 GPU,
+  7 SWARM, 8 TRAIL), calibrated against vanilla XML.
+  The Firestorm mod is in `Documents\Command & Conquer 3 Tiberium Wars\mods\Firestorm`.
+- **Logic independence (2026-10-12):** logic modules read the client FPS only
+  to time drawable fades; movement and pathfinding never do. The patch can't
+  cause units to get stuck (see goals_detailed "Check: can the patch change
+  game logic?").
+- **Uneven rates (B18, 2026-10-12):** any per-frame fraction derived from a
+  Bresenham split must use the continuous form (j·15 − carry)/rate, not j/F.
+  j/F makes motion speed wobble with the 10/11-frame pattern (seen on aircraft
+  at 155 FPS). `temp/interp_sim.py` checks it.

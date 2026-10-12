@@ -238,6 +238,7 @@ static DispatchLogicPhaseFn g_original_dispatch_logic_phase;
 static u32 g_tick_frames;      /* F for the current tick; 0 until the first tick */
 static u32 g_tick_frame;       /* j, 1..F */
 static u32 g_tick_accumulator; /* Bresenham remainder in fifteenths */
+static u32 g_tick_carry;       /* the remainder before the current tick (fifteenths) */
 
 static BOOL high_rate_schedule(void) {
     return g_rate > LOGIC_FPS * LOGIC_PHASE_COUNT;
@@ -276,9 +277,20 @@ static u32 scheduled_phases_done(u32 frame, u32 frames) {
     return 2u + (3u * (frame - 2u)) / (frames - 3u);
 }
 
+/*
+ * A tick spans R = rate / 15 frames, which Bresenham turns into F = 10 or
+ * 11 at 155 FPS. j / F moved things 1/10 of a tick per frame in some ticks
+ * and 1/11 in others: a 10% speed wobble, most visible on aircraft. Frame j
+ * instead shows (j - c) / R, with c the frames carried in from earlier ticks
+ * (the remainder before this tick, in fifteenths). Every frame then advances
+ * exactly 1/R, across tick boundaries too, and the value stays in (0, 1].
+ */
 static void write_tick_interpolation(u8 *engine) {
-    *(float *)(engine + ENGINE_LOGIC_PHASE_INTERPOLATION) =
-        (float)g_tick_frame / (float)g_tick_frames;
+    float fraction = (float)((i32)(LOGIC_FPS * g_tick_frame) - (i32)g_tick_carry) / (float)g_rate;
+
+    if (fraction < 0.0f) fraction = 0.0f;
+    if (fraction > 1.0f) fraction = 1.0f;
+    *(float *)(engine + ENGINE_LOGIC_PHASE_INTERPOLATION) = fraction;
 }
 
 static BOOL logic_tick_running(void) {
@@ -368,6 +380,7 @@ static void THISCALL dispatch_logic_phase_scheduled(void *engine_pointer, u32 ph
         dispatch_counted(engine, phase);
         /* A network stall clears the GameClient flag; the engine then reverts. */
         if (logic_tick_running()) {
+            g_tick_carry = g_tick_accumulator;
             g_tick_accumulator += g_rate;
             g_tick_frames = g_tick_accumulator / LOGIC_FPS;
             g_tick_accumulator %= LOGIC_FPS;
@@ -3954,6 +3967,7 @@ void game_patches_reset_state(void) {
         g_tick_frames = 0u;
         g_tick_frame = 0u;
         g_tick_accumulator = 0u;
+        g_tick_carry = 0u;
         g_minimap_following = FALSE;
         g_minimap_has_shown = FALSE;
         /* Seed so audio service runs before the first logic-phase slice. */

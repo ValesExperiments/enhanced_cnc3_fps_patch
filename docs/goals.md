@@ -38,6 +38,7 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | B15 | Tiberium Vibration Scan highlight should last ~13 s (not 60+) and pulse smoothly | **Done** (crash fixed, confirmed 2026-10-12) |
 | B16 | Rocket smoke trails should stay connected to the rocket (they started a bit behind it) | Implemented 2026-10-12, **needs in-game test** |
 | B17 | Using the Ion Cannon in mission 1 (TW 1.9 mod) must not crash | Implemented 2026-10-12, **needs in-game test** |
+| B18 | No micro-stutter on smoothly moving units (aircraft) at rates that aren't multiples of 15 (e.g. 155) | Implemented 2026-10-12, **needs in-game test** |
 
 ## Groundwork needed first
 

@@ -1105,6 +1105,69 @@ GDI missile soldiers in mission 1).
 
 ---
 
+## B18. Aircraft micro-stutter at 155 FPS
+
+**Status:** implemented 2026-10-12, needs an in-game test.
+
+### Cause
+- At 155 FPS a logic tick lasts R = 155/15 = 10.33 frames. Bresenham gives
+  ticks F = 10, 10, 11, … frames.
+- The interpolation fraction was j / F, so a frame advanced 1/10 of a tick
+  in some ticks and 1/11 in others. Everything moved ~10% slower for one
+  tick in three: a rhythmic speed wobble, most visible on fast, evenly
+  moving aircraft.
+- Stock multiples of 15 (R whole) were unaffected.
+
+### Fix
+- `write_tick_interpolation` now writes `(15·j − carry) / rate`. `carry` is
+  the Bresenham remainder before the tick (`g_tick_carry`, fifteenths of a
+  frame), i.e. how far the tick's ideal start lies before its first frame.
+- Every frame advances exactly 1/R, including across tick boundaries. The
+  value stays in (0, 1] (j ≥ 1, carry < 15, 15·F ≤ carry + rate) and is
+  clamped anyway.
+- Check (`temp/interp_sim.py`), per-frame step:
+
+| Rate | Old step | New step |
+|---|---|---|
+| 155 | 0.0909–0.1000 | 0.0968 |
+| 50 | 0.25–0.33 | 0.30 |
+
+  Every rate from 16 to 240 now matches the ideal 15/rate to within 1e-12.
+  `temp/scheduler_sim.py` still reports 0 errors (phase order and ticks are
+  unchanged).
+- Particles already used the continuous form (accumulator / rate).
+
+---
+
+## Check: can the patch change game logic? (2026-10-12)
+
+Asked after an infantry unit got stuck on a bridge (mission 1, TW 1.9 +
+Firestorm). Static check (TW 1.10):
+- **Logic itself:** the scheduler only changes *when* in a frame the six
+  phases run; every tick still runs all six, in order. The other hooks are
+  client-side.
+- **Client FPS global** (`0xB877C4`, 30 in vanilla, 156/adaptive with the
+  patch): of ~70 readers, the logic-side ones are:
+  - CastleBehavior, TeleportSpecialAbilityUpdate, SpawnBehavior,
+    BezierProjectile/MissileUpdate, SlowDeathBehavior, RebuildHoleExposeDie,
+    SubObjectsUpgrade, LivingWorldEyeTower;
+  - RadarScan (B15).
+
+  The ones checked use it to time **drawable fades** in client frames
+  (`seconds × clientFPS` → `0x46E933` / `0x46E8E1` / `0x473097`), which is
+  correct at any rate and visual only. **No locomotor, pathfinding, AI or
+  movement code reads it.**
+- **`IsClientFrameBoundary`** (patched): its callers are the engine, the
+  GameClient, W3D, `Drawable_updateDrawable`, and a UI progress smoother
+  (`0x5C98F0`, build/upgrade buttons and health bar). None is gameplay.
+- Conclusion: the patch can't make a unit get stuck. Units sticking on
+  bridges is a known SAGE/CnC3 pathfinding issue (bridge layers).
+- Firestorm's Ion Cannon (35 mod-only particle systems; type read from the
+  compiled `data\mod.bin`, see claude_memory) uses only standard types: 21
+  GPU, 11 CPU, 2 render-object, 1 trail. All are covered by B3.
+
+---
+
 ## F2. 100% game speed at any frame rate
 
 **Status:** implemented 2026-10-12 (`adaptive_fps=1`, default on), needs an
