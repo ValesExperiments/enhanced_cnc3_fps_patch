@@ -124,7 +124,9 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
   notices an outside frame cap (e.g. an NVIDIA limit equal to the target)
   and settles just below it instead of bouncing. Best results: no driver
   frame cap for this game, since the mod limits itself. The game's own
-  heavy-logic hitches remain, as in vanilla.
+  heavy-logic hitches remain, as in vanilla. It can use any frame rate
+  from 15 up (not only 15, 30, 45 …), so big battles no longer get stuck at
+  15 FPS when 20–25 would fit.
 - **F1:** Above 90 FPS some frames must run no logic at all. A new
   scheduler gives each 15 Hz logic tick 10 or 11 frames (160 FPS: 11, 11,
   10), runs its six logic phases spread across them (phase 1 on the first

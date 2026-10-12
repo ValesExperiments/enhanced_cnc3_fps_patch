@@ -49,6 +49,17 @@ typedef struct KeyboardLayout {
     BranchSite check_repeat;
 } KeyboardLayout;
 
+typedef struct FrameBoundaryLayout {
+    /*
+     * GameEngine::IsClientFrameBoundary (TW 1.10 VA 0x548131, 8 callers):
+     * ratio = clientFPS / 15; below 6 "phase == 6 / ratio", else
+     * "phase == 1". For every whole ratio that is "the phase counter equals
+     * the last phase of the tick's first frame". Thiscall, result in AL,
+     * keeps ECX.
+     */
+    u32 function;
+} FrameBoundaryLayout;
+
 typedef struct SchedulerLayout {
     /* Start of the 22-byte integer batching expression in DispatchLogicPhase. */
     u32 phase_batch_block;
@@ -426,6 +437,7 @@ typedef struct GameLayout {
     EffectTimingLayout effect_timing;
     ParticleListLayout particle_list;
     TrailVertexLayout trail_vertices;
+    FrameBoundaryLayout frame_boundary;
 } GameLayout;
 
 typedef enum GameResolveResult {

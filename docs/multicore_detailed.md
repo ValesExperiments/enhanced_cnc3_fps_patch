@@ -395,6 +395,19 @@ and drawing blends them. But the live transform is still pushed on every move.
   logic at 660–760 ms/s plus ~11 ms per frame of drawing, 30 FPS needs
   ~1.05 s per second and doesn't fit, but 20–24 FPS would.
 
+## 4h. Remaining M3 sized (2026-10-12)
+
+In the heavy run after M1/M1b/M3a (`temp/profile4`, windows 3–4) the effects
+zone (30 Hz particle and audio updates) is **6.6%** of the main thread, and no
+single function in it is above 0.4%. The client zone is 21.7% (scene render,
+drawable updates, UI, limiter wait).
+
+Moving particle simulation to worker threads would need the client RNG
+(`0xB84DA0`, unlocked), the particle pools, particle-system creation and the
+allocator lock to be shared safely, for at most ~6%. On hold. M2-lite (render
+overlap) and M4 (range queries, ~13% now that logic is 78% of the main
+thread) are larger.
+
 ## 5. Options in detail
 
 ### A. Profiler (prerequisite) — built 2026-10-12

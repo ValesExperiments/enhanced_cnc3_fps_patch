@@ -1979,6 +1979,33 @@ static BOOL resolve_trail_vertex_sites(
     return TRUE;
 }
 
+/* IsClientFrameBoundary: MOV EAX,[clientFPS]; XOR EDX,EDX; DIV [logicFPS]; ... */
+static const u16 g_frame_boundary_pattern[] = {
+    0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x33, 0xD2,
+    0xF7, 0x35, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x56, 0x6A, 0x06, 0x8B, 0xF0, 0x58, 0x3B, 0xF0, 0x7D, 0x0F, 0x99, 0xF7, 0xFE,
+    0x33, 0xD2, 0x5E, 0x39, 0x41, PATTERN_ANY, 0x0F, 0x94, 0xC2, 0x8A, 0xC2, 0xC3,
+    0x33, 0xC0, 0x83, 0x79, PATTERN_ANY, 0x01, 0x5E, 0x0F, 0x94, 0xC0
+};
+
+static BOOL resolve_frame_boundary_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    u32 client_fps;
+    u32 logic_fps;
+
+    if (!FIND_UNIQUE(module, nt, g_frame_boundary_pattern, &game->frame_boundary.function) ||
+        !read_absolute_rva(module, game->pe_size_of_image,
+                           game->frame_boundary.function + 1u, &client_fps) ||
+        !read_absolute_rva(module, game->pe_size_of_image,
+                           game->frame_boundary.function + 9u, &logic_fps)) {
+        return FALSE;
+    }
+    /* Same globals and the engine phase offset (+0x40) our scheduler uses. */
+    return client_fps == game->timing.client_fps && logic_fps == game->timing.logic_fps &&
+           module[game->frame_boundary.function + 31u] == 0x40u &&
+           module[game->frame_boundary.function + 42u] == 0x40u;
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -2199,6 +2226,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_effect_timing_sites(module, nt, &game) ||
         !resolve_particle_list_sites(module, nt, &game) ||
         !resolve_trail_vertex_sites(module, nt, &game) ||
+        !resolve_frame_boundary_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

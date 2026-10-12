@@ -1232,8 +1232,35 @@ per frame. Frames that take longer than 1/target therefore slow everything.
     (`OUTSIDE_LIMIT_MIN_FPS`), and the ceiling is cleared at every session
     start. A real driver cap is then found again within seconds of each
     match start.
-- **Supported rates:** the target; above 90 any rate; 15–90 multiples of 15
-  (the stock schedule needs whole frames per tick); below 15 any whole number,
+- **Round 9 (2026-10-12): any rate from 15 up.** The user saw the rate
+  "stick" at 15 FPS in heavy battles. The next supported step was 30, which
+  didn't fit, while 20–24 would have.
+  - Our scheduler (previously used only above 90) now runs **every rate above
+    15 except the stock multiples 30/45/60/75/90**.
+  - A tick gets F frames by Bresenham. For F ≤ 6, frame j runs the batch of
+    phases up to `floor(6j/F)`, the same batches the stock schedule uses for
+    whole ratios (75 FPS: 1, 1, 1, 1, 2). Above 90 the existing spread is
+    unchanged.
+  - Pieces involved:
+    - `dispatch_batch` runs the batch one stock dispatch per phase;
+    - `get_phase_batch_limit` returns `phase + 1` in our mode, so the stock
+      dispatch never batches by itself;
+    - `is_client_slice_end` = last phase of this frame's batch;
+    - interpolation = j/F;
+    - `GameEngine::IsClientFrameBoundary` (TW `0x548131`, 8 callers: client
+      update, main loop, render, objects) is replaced through a naked stub
+      that keeps ECX/EDX: the phase counter equals the last phase of the
+      tick's first frame. That is exactly the stock "6 / ratio" (or "1" from
+      ratio 6) for every whole ratio.
+  - Every other user of clientFPS / logicFPS was checked in Ghidra (physics
+    uses a float ratio; the pacing multiplier matches the limiter's floor).
+  - `supported_rate_at_most` now allows any whole rate.
+  - Offline simulation (`temp/scheduler_sim.py`) of GameEngine::update with
+    the wrapper, rates 15–240: phases 1–6 in order, exactly 15 ticks/s, one
+    slice-end flush per frame that runs logic, one frame boundary per tick.
+    0 errors.
+- **Supported rates:** the target; any whole rate from 15 up (our
+  scheduler, or stock at multiples of 15 up to 90); below 15 any whole number,
   down to 5.
 - **Below 15 FPS:** the game's integer rate globals stay at 15 (stock code
   divides by `clientFPS/15`; 0 would crash), so its schedule runs one whole

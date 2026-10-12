@@ -203,9 +203,14 @@ static int THISCALL held_zoom_out_at_retail_speed(
  * six logic phases correctly only when clientFPS / 15 divides six. Return the
  * exclusive phase limit for every integral ratio from three through six.
  */
+static BOOL own_schedule(void);
+
 static u32 STDCALL get_phase_batch_limit(u32 phase, u32 ratio) {
     /* ceil(ratio * phase / 6) identifies this phase's client-frame slice. */
     u32 client_slot = (ratio * phase + LOGIC_PHASE_COUNT - 1u) / LOGIC_PHASE_COUNT;
+
+    /* Our scheduler decides the batches: the stock dispatch runs one phase. */
+    if (own_schedule()) return phase + 1u;
     /* The stock loop increments EDI first, hence the exclusive +1 limit. */
     return (LOGIC_PHASE_COUNT * client_slot) / ratio + 1u;
 }
@@ -237,6 +242,19 @@ static BOOL high_rate_schedule(void) {
     return g_rate > LOGIC_FPS * LOGIC_PHASE_COUNT;
 }
 
+/*
+ * Our scheduler runs every rate above 15 except the stock multiples of 15
+ * (30, 45, 60, 75, 90), whose schedules the game handles itself. Between 15
+ * and 90 a tick then gets F = 1..6 frames (Bresenham), each running a batch
+ * of phases; above 90, F >= 7 and some frames run none.
+ */
+static BOOL own_schedule(void) {
+    return high_rate_schedule() || (g_rate > LOGIC_FPS && g_rate % LOGIC_FPS != 0u);
+}
+
+/* Last phase of the tick's current batch (is_client_slice_end). */
+static u32 g_frame_target_phase;
+
 /* Whole client frames per logic tick; below 15 FPS a frame runs whole ticks. */
 static u32 client_frames_per_tick(void) {
     u32 ratio = g_rate / LOGIC_FPS;
@@ -246,6 +264,11 @@ static u32 client_frames_per_tick(void) {
 static void apply_pending_rate(void);
 
 static u32 scheduled_phases_done(u32 frame, u32 frames) {
+    if (frames <= LOGIC_PHASE_COUNT) {
+        /* F <= 6: batches as the stock schedule (75 FPS: 1, 1, 1, 1, 2). */
+        if (frame >= frames) return LOGIC_PHASE_COUNT;
+        return (LOGIC_PHASE_COUNT * (frame != 0u ? frame : 1u)) / frames;
+    }
     if (frame <= 1u) return 1u;
     if (frame >= frames) return LOGIC_PHASE_COUNT;
     /* Phases 2..5 over frames 2..F-1 (F > 6, so steps are 0 or 1). */
@@ -312,13 +335,25 @@ static void run_catch_up_ticks(u8 *engine) {
     }
 }
 
+/* Run phases first..last as this frame's batch (one stock dispatch each). */
+static void dispatch_batch(u8 *engine, u32 first, u32 last) {
+    u32 phase;
+
+    g_frame_target_phase = last;
+    for (phase = first; phase <= last; ++phase) {
+        *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) = phase;
+        dispatch_counted(engine, phase);
+    }
+}
+
 static void THISCALL dispatch_logic_phase_scheduled(void *engine_pointer, u32 phase) {
     u8 *engine = (u8 *)engine_pointer;
     u32 next;
+    u32 target;
 
     /* A new logic tick is the only safe point to change the client rate. */
     if (phase == 1u) apply_pending_rate();
-    if (!high_rate_schedule()) {
+    if (!own_schedule()) {
         dispatch_counted(engine, phase);
         if (phase == 1u && g_rate < LOGIC_FPS && logic_tick_running()) {
             run_catch_up_ticks(engine);
@@ -326,6 +361,9 @@ static void THISCALL dispatch_logic_phase_scheduled(void *engine_pointer, u32 ph
         return;
     }
     if (phase == 1u) {
+        /* The first frame's batch ends here; F is committed if phase 1 runs. */
+        g_frame_target_phase =
+            scheduled_phases_done(1u, (g_tick_accumulator + g_rate) / LOGIC_FPS);
         dispatch_counted(engine, phase);
         /* A network stall clears the GameClient flag; the engine then reverts. */
         if (logic_tick_running()) {
@@ -333,24 +371,63 @@ static void THISCALL dispatch_logic_phase_scheduled(void *engine_pointer, u32 ph
             g_tick_frames = g_tick_accumulator / LOGIC_FPS;
             g_tick_accumulator %= LOGIC_FPS;
             g_tick_frame = 1u;
+            /* The rest of the first frame's batch (F <= 6 only). */
+            target = scheduled_phases_done(1u, g_tick_frames);
+            if (target > 1u) dispatch_batch(engine, 2u, target);
         }
         if (g_tick_frames != 0u) write_tick_interpolation(engine);
         return;
     }
     if (g_tick_frames == 0u) {
         /* Before the first scheduled tick: one phase per frame, as at 90 FPS. */
+        g_frame_target_phase = phase;
         dispatch_counted(engine, phase);
         return;
     }
     next = g_tick_frame < g_tick_frames ? g_tick_frame + 1u : g_tick_frames;
-    if (scheduled_phases_done(next, g_tick_frames) >= phase) {
-        dispatch_counted(engine, phase);
+    target = scheduled_phases_done(next, g_tick_frames);
+    if (target >= phase) {
+        dispatch_batch(engine, phase, target);
     } else {
         /* Render-only frame: undo GameEngine::update's phase increment. */
         *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) = phase - 1u;
     }
     g_tick_frame = next;
     write_tick_interpolation(engine);
+}
+
+/*
+ * GameEngine::IsClientFrameBoundary, for our schedules: true while the phase
+ * counter holds the last phase of the tick's first frame, which is what the
+ * stock "6 / ratio" (or "1" above ratio 6) means for every whole ratio.
+ */
+static u32 STDCALL is_client_frame_boundary(u8 *engine) {
+    u32 phase = *(u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE);
+    u32 ratio;
+
+    if (own_schedule() && g_tick_frames != 0u) {
+        return phase == scheduled_phases_done(1u, g_tick_frames);
+    }
+    ratio = *(u32 *)game_address(g_game, g_game->timing.client_fps) /
+            *(u32 *)game_address(g_game, g_game->timing.logic_fps);
+    if (ratio < LOGIC_PHASE_COUNT) {
+        return ratio != 0u && phase == LOGIC_PHASE_COUNT / ratio;
+    }
+    return phase == 1u;
+}
+
+/* ECX = engine, result in AL; ECX and EDX are kept like the stock leaf's callers expect. */
+__attribute__((naked)) static void is_client_frame_boundary_entry(void) {
+    __asm__ volatile(
+        "pushl %%ecx\n\t"
+        "pushl %%edx\n\t"
+        "pushl %%ecx\n\t"
+        "calll %c0\n\t"
+        "popl %%edx\n\t"
+        "popl %%ecx\n\t"
+        "retl"
+        :
+        : "i"(is_client_frame_boundary));
 }
 
 /*
@@ -365,7 +442,7 @@ static void THISCALL update_phase_interpolation(void *engine_pointer) {
     u32 client_slot = (ratio * phase + LOGIC_PHASE_COUNT - 1u) / LOGIC_PHASE_COUNT;
     float interpolation;
 
-    if (high_rate_schedule() && g_tick_frames != 0u) {
+    if (own_schedule() && g_tick_frames != 0u) {
         write_tick_interpolation(engine);
         return;
     }
@@ -424,6 +501,8 @@ static BOOL STDCALL is_client_slice_end(u32 phase) {
     u32 client_slot;
     u32 end_phase;
 
+    /* Our schedules: a slice is this frame's batch. */
+    if (own_schedule()) return phase >= g_frame_target_phase;
     /* From six client frames per tick on, every phase is its own slice. */
     if (ratio >= LOGIC_PHASE_COUNT) return TRUE;
     client_slot = (ratio * phase + LOGIC_PHASE_COUNT - 1u) / LOGIC_PHASE_COUNT;
@@ -2840,6 +2919,21 @@ static void install_trail_vertex_fix(PatchInstaller *installer) {
     patch_bytes(installer, "trail vertex read-back", rva, readback, jump, sizeof(jump));
 }
 
+/* The frame-boundary test follows our schedules (see is_client_frame_boundary). */
+static void install_frame_boundary(PatchInstaller *installer) {
+    u32 rva = g_game->frame_boundary.function;
+    u8 expected[5];
+    u8 jump[5] = { 0xE9, 0, 0, 0, 0 };
+
+    memcpy(expected, game_address(g_game, rva), sizeof(expected));
+    if (expected[0] != 0xA1) {
+        installer->ok = FALSE;
+        return;
+    }
+    encode_rel32(&jump[1], game_address(g_game, rva + 5u), is_client_frame_boundary_entry);
+    patch_bytes(installer, "IsClientFrameBoundary entry", rva, expected, jump, sizeof(jump));
+}
+
 static void install_minimap_glide(PatchInstaller *installer) {
     static const char *const names[MINIMAP_LOOK_AT_MAX][MINIMAP_LOOK_AT_CALLS] = {
         { "minimap look-at call 1", "minimap look-at call 2" },
@@ -3048,14 +3142,8 @@ static u32 supported_rate_at_most(double fps) {
     u32 rate;
 
     if (fps >= (double)target) return target;
-    /* Above 90 any rate; 15..90 multiples of 15; below 15 any whole number. */
-    if (fps > LOGIC_FPS * LOGIC_PHASE_COUNT) {
-        rate = (u32)fps;
-    } else if (fps >= LOGIC_FPS) {
-        rate = (u32)(fps / LOGIC_FPS) * LOGIC_FPS;
-    } else {
-        rate = fps > 0.0 ? (u32)fps : 0u;
-    }
+    /* Any whole rate (15..90 and above: our scheduler; below 15: catch-up). */
+    rate = fps > 0.0 ? (u32)fps : 0u;
     if (rate < MIN_ADAPTIVE_FPS) rate = MIN_ADAPTIVE_FPS;
     if (rate > target) rate = target;
     return rate;
@@ -3705,6 +3793,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_effect_timing(&installer);
     install_particle_index(&installer);
     install_trail_vertex_fix(&installer);
+    install_frame_boundary(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);

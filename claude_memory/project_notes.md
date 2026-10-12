@@ -236,6 +236,10 @@ Fix or remove anything that turns out to be wrong.
 - **Diagnosing a DLL crash:** Windows Application log (event 1000) gives the
   fault offset in DINPUT8.dll; disassemble the shipped DLL at that RVA with
   capstone + pefile (installed in the project venv).
+- **Since 2026-10-12 our scheduler runs every rate > 15 except multiples of
+  15 up to 90** (stock path). F ≤ 6 frames per tick use stock-style batches
+  `floor(6j/F)`; `IsClientFrameBoundary` is hooked (it compared the phase with
+  `6/ratio`). Simulate with `temp/scheduler_sim.py` after any scheduler change.
 - **Logic scheduling (F1):** `GameEngine_update` (TW 0x54B0CE) does
   `phase++` then dispatches via vtable slot 0x94 (`DispatchLogicPhase`, live
   vtable is `Win32GameEngine`). Wrap to phase 1 = new logic tick (may stall:

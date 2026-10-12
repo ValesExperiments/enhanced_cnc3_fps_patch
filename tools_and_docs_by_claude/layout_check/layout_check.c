@@ -149,6 +149,7 @@ static int check(const char *path) {
         { "effect_timing", resolve_effect_timing_sites },
         { "particle_list", resolve_particle_list_sites },
         { "trail_vertices", resolve_trail_vertex_sites },
+        { "frame_boundary", resolve_frame_boundary_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -241,6 +242,7 @@ static int check(const char *path) {
                full.particle_list.erase_calls[2].instruction,
                full.particle_list.list_offset, full.particle_list.key_offset);
         printf("  trail vertex read-back 0x%X\n", full.trail_vertices.readback);
+        printf("  IsClientFrameBoundary 0x%X\n", full.frame_boundary.function);
         printf("  particle sibling search setup 0x%X, mismatch jump 0x%X\n",
                full.particle_list.sibling_setup, full.particle_list.sibling_mismatch);
         printf("  minimap look-at copies %u, view 0x%X\n",
