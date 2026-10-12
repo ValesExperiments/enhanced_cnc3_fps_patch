@@ -154,6 +154,7 @@ static int check(const char *path) {
         { "apt_calls", resolve_apt_call_sites },
         { "history_refresh", resolve_history_refresh_sites },
         { "turret_fraction", resolve_turret_fraction_sites },
+        { "recoil", resolve_recoil_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -253,7 +254,9 @@ static int check(const char *path) {
                full.range_query.query_calls[2].instruction, full.range_query.distance_table,
                full.range_query.add_call.instruction, full.range_query.add_call.target);
         printf("  apt variable function 0x%X\n", full.apt_calls.variable_function);
-        printf("  turret fraction load 0x%X\n", full.turret_fraction.engine_load);
+        printf("  turret fraction load 0x%X, pitch site 0x%X\n", full.turret_fraction.engine_load,
+               full.turret_fraction.pitch_site);
+        printf("  recoil step site 0x%X\n", full.recoil.step_site);
         printf("  history refresh 0x%X (%s)\n", full.history_refresh.function,
                full.history_refresh.kane ? "KW, 2 args" : "TW, 1 arg");
         printf("  apt call variants %u: 0x%X 0x%X 0x%X 0x%X 0x%X\n", full.apt_calls.count,

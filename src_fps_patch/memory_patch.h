@@ -5,7 +5,7 @@
 
 enum {
     /* 63 writes (Kane's Wrath) are installed as of 2026-10-11; keep headroom. */
-    PATCH_TRANSACTION_CAPACITY = 96,
+    PATCH_TRANSACTION_CAPACITY = 128,
     PATCH_MAX_BYTES = 48
 };
 

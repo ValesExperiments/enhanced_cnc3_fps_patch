@@ -1139,9 +1139,70 @@ GDI missile soldiers in mission 1).
 
 ---
 
-## B21. Turrets shake back and forth while moving
+## B23. Barrel recoil plays too fast (Juggernaut, Mammoth, ...)
 
 **Status:** fix implemented 2026-10-12, needs an in-game test.
+
+- **Report:** the barrel kick-back of the Juggernaut and the Mammoth (and
+  every other unit with a `WeaponRecoilBone`) plays too fast.
+- **Data:** the draw module's `InitialRecoilSpeed`, `MaxRecoilDistance`,
+  `RecoilDamping`, `RecoilSettleSpeed` (`ScriptedModelDraw.xsd`; Juggernaut
+  and Mammoth: 16 / 10 / 2.0 / 3). C&C3 has no INI strings for them (binary
+  assets), so the code was found from the 0.01 "tiny rate" constant.
+- **Code:** W3D draw's client recoil handler (TW 1.10 `0x863B46`) runs per
+  drawn frame and steps each active recoil record (+0x14 state: 1/2 kick,
+  3 settle, 0 idle; +0x18 shift; +0x1C rate) with 30 Hz constants from the
+  module data (+0x5C max, +0x60 damping, +0x64 settle speed):
+  - kick: `shift += rate; rate *= damping`; settle when `shift >= max`
+    (clamped) or `|rate| < 0.01`;
+  - settle: `shift -= settle`; idle at 0.
+
+  So at 155 FPS the whole kick and settle took about 1/5 of the time.
+- **Fix `recoil_rate`:** the 7 bytes that start the state switch
+  (`CMP EAX,2; JLE; CMP EAX,3`) become `CALL recoil_step_entry; JMP` to the
+  switch end (`XORPS XMM0,XMM0`). The entry keeps EAX/ECX/EDX/XMM0-7 (the
+  code after the switch needs ECX = 0) and calls `recoil_step(record, data)`,
+  which advances by k = 30 / live FPS of a retail frame:
+  - kick: `rate *= d^k`, `shift += rate * (d^k - 1)/(d - 1)` (k when
+    d = 1), which sums to exactly the retail shift at every 1/30 s;
+  - settle: `shift -= settle * k`;
+  - the retail end tests; at or below 30 FPS, or for damping <= 0, the
+    retail step.
+- Simulation (`temp/recoil_sim.py`): end times at 155 FPS match 30 FPS
+  within one retail frame (Juggernaut values 3.48 s vs 3.53 s).
+- Resolver: the whole switch is identical in all four builds (TW 1.10
+  `0x463C29` RVA, TW 1.9 `0xD0D05`, KW 1.03 `0x4191F5`, KW 1.02
+  `0xD15BD`).
+- Seen on the way (not reported yet): `0x850FFE` (a W3D draw update) adds
+  1/30 to a blend at +0x2F4 once per client frame (`+0.033333335`), which
+  is also 30 Hz-tuned. If a "fades in too fast" report comes up, look there.
+
+## B22. Turret pitch (up/down) steps at 15 Hz
+
+**Status:** done, confirmed by the user 2026-10-12.
+
+- **Report (after B21):** turrets turn smoothly, but aiming up/down still
+  steps. This is vanilla: the same function (TW 1.10 `0x8580A2`) keeps a
+  pitch history like the rotation's (cache +4 previous, +0xC current,
+  shifted when s == 1.0), but the pitch bone gets the **raw logic pitch**:
+  `MOVSS XMM0,[-0.0]; SUBSS XMM0,[EBP-8]` → `0x46CF1E` (rotate X).
+- **Fix `turret_pitch`:** those 13 bytes become `CALL turret_pitch_stub` +
+  8 NOPs. The stub returns `-0.0 - pitch`, where pitch is:
+  - the previous pitch on the shift frame (as the rotation draws it);
+  - otherwise previous + (current − previous)·s (s at `[EBP-0x14]`, from
+    the B21 view);
+  - the raw pitch when the turret keeps no history (`[EDI+0x24] == 0`).
+
+  It uses EAX and XMM0–2 only; the following code reloads EAX and ECX.
+- Resolver: the whole pitch block is identical in all four builds (same
+  stack offsets); the constant is checked to be −0.0. The compiled stub
+  was checked.
+- The patch transaction capacity was raised from 96 to 128 (room for all
+  diagnostics).
+
+## B21. Turrets shake back and forth while moving
+
+**Status:** done (confirmed in-game 2026-10-12).
 
 **Report:** every TurretAI vehicle and base defence (e.g. Predator, missile
 batteries) shakes rapidly while moving, on TW 1.10 and 1.9 with the patch.

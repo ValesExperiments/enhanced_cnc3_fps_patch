@@ -88,7 +88,26 @@ typedef struct TurretFractionLayout {
      * fraction is exactly 1.0. RVA of that 5-byte MOV EAX,[engine].
      */
     u32 engine_load;
+    /*
+     * B22: in the same function the pitch bone gets the raw logic pitch
+     * (MOVSS XMM0,[-0.0]; SUBSS XMM0,[EBP-8], 13 bytes) although the pitch
+     * history (cache +4 previous, +0xC current) is kept like the rotation's.
+     */
+    u32 pitch_site;
 } TurretFractionLayout;
+
+typedef struct RecoilLayout {
+    /*
+     * B23: W3D draw's client recoil handler (TW 1.10 VA 0x863B46) steps
+     * every active weapon-recoil bone once per drawn frame: record +0x14
+     * state (1/2 kick, 3 settle, 0 idle), +0x18 shift, +0x1C rate; module
+     * data +0x5C MaxRecoilDistance, +0x60 RecoilDamping, +0x64
+     * RecoilSettleSpeed (per 30 Hz frame). RVA of the 7-byte
+     * CMP EAX,2 / JLE / CMP EAX,3 that starts the state switch; the switch
+     * ends at step_site + 0x7D (XORPS XMM0,XMM0).
+     */
+    u32 step_site;
+} RecoilLayout;
 
 typedef struct HistoryRefreshLayout {
     /*
@@ -495,6 +514,7 @@ typedef struct GameLayout {
     AptCallLayout apt_calls;
     HistoryRefreshLayout history_refresh;
     TurretFractionLayout turret_fraction;
+    RecoilLayout recoil;
 } GameLayout;
 
 typedef enum GameResolveResult {

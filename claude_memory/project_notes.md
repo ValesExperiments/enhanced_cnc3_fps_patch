@@ -303,6 +303,13 @@ Fix or remove anything that turns out to be wrong.
   in one run).
 - Branch scans: a function's callers can include tail `JMP`s (E9), not only
   `CALL`s (E8). Ghidra reports both as calls.
+- **Finding a module's code without strings (B23, 2026-10-12):** C&C3 loads
+  binary assets, so XML field names (`RecoilDamping`, ...) are not in the exe.
+  Get the field names/defaults from `tools_and_docs_by_user/CnC_Modding_Support/
+  Kanes Wrath/Schemas`, remember the Generals algorithm, then search for a
+  characteristic float constant (e.g. 0.01 = `0A D7 23 3C` at TW 0xA34FD0)
+  and filter its xrefs by address range (W3D draw code is ~0x840000-0x870000
+  in TW 1.10). Found the recoil handler (0x863B46) in three steps.
 
 ## Lessons from tooling problems
 - A PyGhidra/JVM process does **not** exit when its MCP client disconnects,

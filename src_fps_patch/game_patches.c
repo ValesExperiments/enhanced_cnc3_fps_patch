@@ -2592,6 +2592,166 @@ static void install_turret_fraction(PatchInstaller *installer) {
                 sizeof(load_view));
 }
 
+/*
+ * B22: turrets turned smoothly but pitched in 15 Hz steps: the pitch bone
+ * got the raw logic pitch, although the pitch history is kept exactly like
+ * the rotation's. The bone's value (-0.0 - pitch) is now computed from the
+ * interpolated pitch: the previous one on the frame the history shifts
+ * (s == 1.0), else previous + (current - previous) * s, and the raw pitch
+ * when the turret keeps no history ([EDI+0x24] == 0). Called from the
+ * replaced MOVSS/SUBSS pair; uses EAX and XMM0-XMM2 only (the following code
+ * reloads EAX and ECX), result in XMM0.
+ */
+static const float g_turret_pitch_one = 1.0f;
+static const float g_turret_pitch_negative_zero = -0.0f;
+
+__attribute__((naked)) static void turret_pitch_stub(void) {
+    __asm__ volatile("movss -0x8(%%ebp), %%xmm0\n\t"
+                     "cmpl $0, 0x24(%%edi)\n\t"
+                     "je 1f\n\t"
+                     "movl -0x10(%%ebp), %%eax\n\t"
+                     "movss 4(%%eax), %%xmm0\n\t"
+                     "movss -0x14(%%ebp), %%xmm1\n\t"
+                     "ucomiss %c0, %%xmm1\n\t"
+                     "jp 2f\n\t"
+                     "je 1f\n\t"
+                     "2:\n\t"
+                     "movss 0xc(%%eax), %%xmm2\n\t"
+                     "subss %%xmm0, %%xmm2\n\t"
+                     "mulss %%xmm1, %%xmm2\n\t"
+                     "addss %%xmm2, %%xmm0\n\t"
+                     "1:\n\t"
+                     "movss %c1, %%xmm1\n\t"
+                     "subss %%xmm0, %%xmm1\n\t"
+                     "movaps %%xmm1, %%xmm0\n\t"
+                     "retl"
+                     :
+                     : "i"(&g_turret_pitch_one), "i"(&g_turret_pitch_negative_zero));
+}
+
+static void install_turret_pitch(PatchInstaller *installer) {
+    u32 rva = g_game->turret_fraction.pitch_site;
+    u8 expected[13];
+    u8 call[13] = { 0xE8, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+
+    memcpy(expected, game_address(g_game, rva), sizeof(expected));
+    if (expected[0] != 0xF3 || expected[1] != 0x0F || expected[2] != 0x10 || expected[8] != 0xF3 ||
+        expected[9] != 0x0F || expected[10] != 0x5C) {
+        installer->ok = FALSE;
+        return;
+    }
+    encode_rel32(&call[1], game_address(g_game, rva + 5u), (const void *)turret_pitch_stub);
+    patch_bytes(installer, "turret pitch interpolation", rva, expected, call, sizeof(call));
+}
+
+/*
+ * B23: weapon-recoil bones (the Juggernaut's and Mammoth's barrels) are
+ * stepped once per drawn frame with 30 Hz constants, so at 155 FPS the kick
+ * and the settle played five times too fast. The state switch now calls
+ * recoil_step, which advances by k = 30 / live FPS of a retail frame:
+ *   kick:   rate *= d^k and shift += rate * (d^k - 1) / (d - 1), which sums
+ *           to exactly the retail shift at every 1/30 s (d = damping);
+ *   settle: shift -= settle * k.
+ * The end tests are the retail ones. At or below 30 FPS, and for a
+ * damping <= 0 (no smooth equivalent), it is the retail step.
+ */
+enum {
+    RECOIL_STATE = 0x14,
+    RECOIL_SHIFT = 0x18,
+    RECOIL_RATE = 0x1C,
+    RECOIL_DATA_MAX = 0x5C,
+    RECOIL_DATA_DAMPING = 0x60,
+    RECOIL_DATA_SETTLE = 0x64,
+    RECOIL_IDLE = 0,
+    RECOIL_KICK_LAST = 2,
+    RECOIL_SETTLING = 3,
+    RECOIL_SWITCH_END = 0x7D
+};
+static const float RECOIL_TINY_RATE = 0.01f;
+
+static void recoil_step(u8 *recoil, const u8 *data) {
+    i32 *state = (i32 *)(recoil + RECOIL_STATE);
+    float *shift = (float *)(recoil + RECOIL_SHIFT);
+    float *rate = (float *)(recoil + RECOIL_RATE);
+    float max = *(const float *)(data + RECOIL_DATA_MAX);
+    float damping = *(const float *)(data + RECOIL_DATA_DAMPING);
+    float k = g_rate > g_retail_visual_fps ? (float)g_retail_visual_fps / (float)g_rate : 1.0f;
+    float factor = damping;
+    float step = 1.0f;
+
+    if (*state <= RECOIL_KICK_LAST) {
+        if (k < 1.0f && damping > 0.0f) {
+            if (damping == 1.0f) {
+                step = k;
+            } else {
+                factor = powf(damping, k);
+                step = (factor - 1.0f) / (damping - 1.0f);
+            }
+        }
+        *shift += *rate * step;
+        *rate *= factor;
+        if (!(*shift < max)) {
+            *shift = max;
+            *state = RECOIL_SETTLING;
+        } else if (fabsf(*rate) < RECOIL_TINY_RATE) {
+            *state = RECOIL_SETTLING;
+        }
+    } else if (*state == RECOIL_SETTLING) {
+        *shift -= *(const float *)(data + RECOIL_DATA_SETTLE) * k;
+        if (!(*shift > 0.0f)) {
+            *shift = 0.0f;
+            *state = RECOIL_IDLE;
+        }
+    }
+}
+
+/*
+ * Called from the switch with ESI = recoil record and [EBP-0x10] = module
+ * data; keeps every register (the code after the switch expects ECX = 0).
+ */
+__attribute__((naked)) static void recoil_step_entry(void) {
+    __asm__ volatile("pushl %%eax\n\t"
+                     "pushl %%ecx\n\t"
+                     "pushl %%edx\n\t"
+                     "subl $128, %%esp\n\t"
+                     "movdqu %%xmm0, 0(%%esp)\n\t"
+                     "movdqu %%xmm1, 16(%%esp)\n\t"
+                     "movdqu %%xmm2, 32(%%esp)\n\t"
+                     "movdqu %%xmm3, 48(%%esp)\n\t"
+                     "movdqu %%xmm4, 64(%%esp)\n\t"
+                     "movdqu %%xmm5, 80(%%esp)\n\t"
+                     "movdqu %%xmm6, 96(%%esp)\n\t"
+                     "movdqu %%xmm7, 112(%%esp)\n\t"
+                     "pushl -0x10(%%ebp)\n\t"
+                     "pushl %%esi\n\t"
+                     "calll %c0\n\t"
+                     "addl $8, %%esp\n\t"
+                     "movdqu 0(%%esp), %%xmm0\n\t"
+                     "movdqu 16(%%esp), %%xmm1\n\t"
+                     "movdqu 32(%%esp), %%xmm2\n\t"
+                     "movdqu 48(%%esp), %%xmm3\n\t"
+                     "movdqu 64(%%esp), %%xmm4\n\t"
+                     "movdqu 80(%%esp), %%xmm5\n\t"
+                     "movdqu 96(%%esp), %%xmm6\n\t"
+                     "movdqu 112(%%esp), %%xmm7\n\t"
+                     "addl $128, %%esp\n\t"
+                     "popl %%edx\n\t"
+                     "popl %%ecx\n\t"
+                     "popl %%eax\n\t"
+                     "retl"
+                     :
+                     : "i"(recoil_step));
+}
+
+static void install_recoil_rate(PatchInstaller *installer) {
+    static const u8 expected[7] = { 0x83, 0xF8, 0x02, 0x7E, 0x29, 0x83, 0xF8 };
+    u32 rva = g_game->recoil.step_site;
+    u8 call[7] = { 0xE8, 0, 0, 0, 0, 0xEB, (u8)(RECOIL_SWITCH_END - 7) };
+
+    encode_rel32(&call[1], game_address(g_game, rva + 5u), (const void *)recoil_step_entry);
+    patch_bytes(installer, "weapon recoil rate", rva, expected, call, sizeof(call));
+}
+
 static void install_apt_call_counter(PatchInstaller *installer) {
     static const u8 prologue[6] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20 };
     static void (*const stubs[APT_CALL_FUNCTIONS])(void) = {
@@ -4443,6 +4603,8 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     INSTALL_FEATURE(spawn_logger);
     INSTALL_FEATURE(teleport_snap);
     INSTALL_FEATURE(turret_fraction);
+    INSTALL_FEATURE(turret_pitch);
+    INSTALL_FEATURE(recoil_rate);
     INSTALL_FEATURE(drawable_interpolation_window);
     INSTALL_FEATURE(particle_and_cursor_timing);
     INSTALL_FEATURE(phase_scheduler);
