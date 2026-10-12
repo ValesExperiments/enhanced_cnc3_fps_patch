@@ -98,10 +98,12 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
   15 FPS each frame runs several logic ticks. It rises again when there's
   headroom. It now tells the game's logic cost (same at any frame rate)
   from drawing cost and computes the right rate directly, and the limiter
-  repays time lost to heavy logic frames. It judges over 2 seconds, drops
-  only on sustained overload (never more than halfway at once) and rises
-  only after a second of clearly low load, so short hitches no longer cause
-  big drops. The game's own heavy-logic hitches (7 AIs) remain, as in
+  repays time lost to heavy logic frames. It times the game's logic
+  directly, judges over 2 seconds, drops only when the game really runs
+  slow (a driver frame cap no longer fools it, never more than halfway at
+  once) and rises after a second of clearly low load. When the logic alone
+  fills the CPU (huge battles), it stays at 30 FPS or more, since lower
+  rates can't help then. The game's own heavy-logic hitches remain, as in
   vanilla.
 - **F1:** Above 90 FPS some frames must run no logic at all. A new
   scheduler gives each 15 Hz logic tick 10 or 11 frames (160 FPS: 11, 11,

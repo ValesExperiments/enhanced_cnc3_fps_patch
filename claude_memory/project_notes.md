@@ -167,6 +167,12 @@ Fix or remove anything that turns out to be wrong.
   "everything scales with the rate", and limit any single step (round 5:
   never below half, at most 1.5× up). Simulate monitor changes in temp/
   before shipping (temp/model_sim5.py).
+  Round 6 replaced the regression: logic is **timed directly** (QPC around
+  each dispatch), and drops require real slowness (frame speed < 97%), not
+  just load. The user runs an **NVIDIA driver cap equal to target_fps**:
+  that wait counts as frame "work" (load reads 100%+ with nothing slow).
+  When logic alone exceeds ~800 ms per game second, lower frame rates
+  can't restore speed, so the floor is 30 FPS (temp/model_sim6.py).
   `g_config->target_fps <= 30` stays only as the
   "patch active" guard. The game's integer rate globals must never go below
   15 (stock code divides by `clientFPS/15`).

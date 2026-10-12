@@ -953,6 +953,40 @@ per frame. Frames that take longer than 1/target therefore slow everything.
     minute). Logic at 93% of the CPU walks down to 11 FPS. All at 100–101%
     speed, except bursts whose logic alone exceeds a second (96.8%,
     physically unavoidable).
+- **Round 6 (timed logic, speed-based drops).** The user's run (TW 1.9, cap
+  156, driver cap 156) mostly held 156, but showed two problems:
+  - In menus and light scenes it dropped 156 → 140 → 156 at "drawing 6.4
+    ms, load 100%". 6.41 ms is the NVIDIA cap of 156, while the limiter aims
+    ~1% fast (990/rate ms). The driver's wait counted as work, so load read
+    100%+ although nothing was slow.
+  - In a huge battle it walked 109 → 93 → 75 → 45 → 30 → 15 → … → 5, each
+    step at "load 100%". At 15 FPS the fit said logic ≈ 62 ms/tick (≈ 930
+    ms per game second): the logic alone filled the CPU, so lower rates
+    couldn't help. The proportional fallback still assumed they would.
+  Now:
+  - `dispatch_counted` times every logic dispatch with QPC
+    (`g_frame_logic_us`). The monitor no longer fits anything: over the last
+    2 s of real time (≥ 1 s and ≥ 8 frames before judging) it computes
+    logic ms per game second (logic time / ticks × 15), drawing ms per frame
+    ((work − logic) / frames), load, frame speed (frames × 1000/rate ÷
+    elapsed) and game-tick speed (ticks ÷ 15 ÷ elapsed).
+  - Drop only when load > 100% **and** frame speed < 97% (a driver cap
+    raises load but not slowness). Same 90% target and halving limit.
+  - Logic-bound floor: logic > 800 ms per game second → never below 30 FPS
+    (and back to 30 if below). Lower rates only help when drawing is the
+    problem.
+  - The time-based window makes slow-drawing PCs react in seconds (80 ms
+    frames: 156 → 10 FPS in ~7 s instead of ~25 s).
+  - Logging: every decision line has a `[seconds]` timestamp, frame speed
+    and logic ms/s, and a status line is written every 10 s
+    ("Adaptive pacing [Ns]: R FPS, frames %, game ticks %, logic ms/s,
+    drawing ms/frame, load %"). Game ticks % also shows whether below-15
+    catch-up keeps real time (an open question: a skirmish may stall extra
+    ticks per frame).
+  - Simulated (temp/model_sim6.py): light / 7-AI / stock starts stay put; menu
+    with a driver cap at 156 holds 156; logic 930 ms/s → 30 FPS (97%);
+    slow drawing → 10 FPS. Heavy load with a driver cap of exactly the
+    target drops to ~107: the cap leaves no room to repay overruns.
 - **Supported rates:** the target; above 90 any rate; 15–90 multiples of 15
   (the stock schedule needs whole frames per tick); below 15 any whole number,
   down to 5.
