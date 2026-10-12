@@ -43,7 +43,8 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | B22 | Turrets should pitch (aim up/down) smoothly, like they already turn | **Done** (`turret_pitch`, vanilla bug, confirmed 2026-10-12) |
 | B23 | Barrel recoil (Juggernaut, Mammoth, every `WeaponRecoilBone`) must play at retail speed | **Done** (`recoil_rate`, confirmed 2026-10-12) |
 | B19 | Newly produced aircraft (Firestorm airfield) must not show in the air for one frame | **Done** (`teleport_snap`: teleports snap instead of sliding; confirmed 2026-10-12, teleporting units fine) |
-| B20 | Build menu icons must not vanish for one frame after clicking a build button | Cause found (tiles rebuild their clips on SetEnabled, filled only on the ~30 Hz Flash tick); fix `button_enable_tick` implemented 2026-10-12, **needs in-game test** |
+| B24 | Ground (Firestorm GDI "White House") must not show bright straight-edged patches that move with the camera | **Closed, not ours**: a Firestorm mod issue (the mod shows similar geometry glitches at 30 FPS; reloading clears it) |
+| B20 | Build menu icons must not vanish for one frame after clicking a build button | **Done** (`button_enable_tick`, confirmed 2026-10-12) |
 
 ## Groundwork needed first
 

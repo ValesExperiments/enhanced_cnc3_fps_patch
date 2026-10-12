@@ -295,6 +295,12 @@ Fix or remove anything that turns out to be wrong.
 - **Check "is it vanilla?" first.** The user is happy to test without the DLL
   at 30 FPS; the smoke pop and the shroud-return shadow blink both turned out
   to be vanilla. Ask early when a symptom might be stock behaviour.
+- **Firestorm has its own render glitches (B24, 2026-10-12).** The user plays
+  Firestorm 1.12 on TW 1.9; the mod replaces maps (readable `map.xml` in
+  `Firestorm_1.12.big`), terrain textures and some shaders, and shows
+  random stretching geometry even at 30 FPS. A terrain-patch glitch turned
+  out to be the mod (cleared by reloading). For graphics bugs on mod maps,
+  ask early: "does reloading clear it?" and "does it happen on a vanilla map?"
 - Diagnostics in `fps_patch.ini` (all need `logging=1`, 0 = off):
   `debug_motion_frames`, `debug_frame_times`, `debug_trail_draws` (per
   trail-system draw: frame, step, blend fraction, emitter position, per-trail

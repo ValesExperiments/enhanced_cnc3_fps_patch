@@ -1139,6 +1139,50 @@ GDI missile soldiers in mission 1).
 
 ---
 
+## B24. Rain-reflective ground flickers (GDI "White House")
+
+**Status:** closed, not our bug (2026-10-12). The user confirmed it is a
+Firestorm mod issue: the mod already shows glitches such as randomly
+stretching geometry at 30 FPS, and reloading the game clears this one.
+Nothing to fix in the patch. Notes below are kept for reference.
+
+- **Report:** the wet, reflective ground (clouds reflected, walkable, no
+  water on the map) sometimes shows triangles turning brighter/whiter,
+  changing with camera movement. Stable at 30 FPS without the DLL.
+- **Shader (`Shaders/Terrain.fx`):** with rainy weather (`WeatherMode` 2/3)
+  the terrain lerps toward a reflection by the macro texture: either the
+  mirror reflection render target `WaterDraw.ReflectionTexture` (screen
+  projected per vertex) or the cube map `Terrain.EnvironmentTexture`. The
+  cloud layer scrolls with the shader `Time`.
+- **Engine (TW 1.10):** `W3DDisplay::draw` (`0x839FB3`) calls the reflection
+  renderer (`[0xC16BF0]`) method `0x837903` every drawn frame (unless
+  `[0xBEE574]+0x65`): clear "valid" +0x118, then if `0x8377FD(camera)`
+  (rainy and water quality > 2, or a reflective area visible; never with
+  `-noReflections` = `[0xC16BD1]`) render it (`0x8188A5`) and set +0x118.
+  The terrain's `ReflectionTexture` getter (`0x8205F7`) binds +0xC0 when
+  valid, else a default texture (`0x756324`).
+- No frame-rate dependency found statically yet; next: bisect
+  (`debug_disable` with all non-core features).
+
+**Round 1 (2026-10-12):**
+- Bisect with all 27 non-core features disabled: **no change**, so it's the
+  core (the game running above 30 FPS), not one of our fixes.
+- The user plays **Firestorm 1.12**, which ships its own White House map
+  (`data\maps\official\map_sp_gdi_1_4_white_house\map.xml`, readable XML,
+  copy in `temp/b24/`): `weather=0` (sunny, so the rain reflection above is
+  **not** involved), `EnvironmentData Cloud="CM2_cloud" Macro="TSCloudMed"`,
+  post effects `BleachByPass_vol` and `LUBlueZone_Vol`; it also replaces
+  many terrain textures and `_nrm` maps (specular in the normal map), but
+  no terrain shader (its compiled shaders: particles, objects, rain,
+  water).
+- Screenshots: lighter, straight-edged patches (triangles) that differ
+  between two nearby camera positions; they stay while the camera is
+  still. The cloud layer (`CurrentOffsetUV`, per frame, map-wide) isn't
+  camera-dependent; camera-dependent terrain inputs are the shadow map
+  (fitted to the view), the per-vertex specular half vector and fog.
+- Outcome: the user found it's a mod issue (see Status); the tests above
+  were not needed.
+
 ## B23. Barrel recoil plays too fast (Juggernaut, Mammoth, ...)
 
 **Status:** fix implemented 2026-10-12, needs an in-game test.
@@ -1511,7 +1555,7 @@ changes reach Flash another way (still open).
   tick. Leading hypothesis: at 30 FPS a Flash tick follows in the same frame;
   at 155 FPS the rebuilt tiles are drawn empty until the next tick.
 
-**Fix `button_enable_tick` (implemented 2026-10-12, needs a test):**
+**Fix `button_enable_tick` (confirmed in-game 2026-10-12):**
 - An entry hook on the bool direct-call helper (TW 1.10 `0x784E58`, cdecl
   `(path, name, &bool)`, first instruction `MOV EDX,[g_aptPlayer]`, 6 bytes
   replaced by `JMP` + NOP and replayed in the stub). When `name` is the
