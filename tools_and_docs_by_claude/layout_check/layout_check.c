@@ -146,6 +146,7 @@ static int check(const char *path) {
         { "tint_envelope", resolve_tint_envelope_sites },
         { "minimap", resolve_minimap_sites },
         { "waypoint_lines", resolve_waypoint_line_sites },
+        { "effect_timing", resolve_effect_timing_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -214,6 +215,20 @@ static int check(const char *path) {
         printf("  waypoint lines: call 0x%X, object pos +0x%X, drawable +0x%X/+0x%X\n",
                full.waypoint_lines.line_call.instruction, full.waypoint_lines.object_position,
                full.waypoint_lines.object_drawable, full.waypoint_lines.drawable_object);
+        printf("  effect timing: fade in 0x%X out 0x%X, summon fades 0x%X->0x%X 0x%X->0x%X "
+               "0x%X->0x%X, pulse play 0x%X, pulse colour 0x%X calls 0x%X 0x%X, logic 0x%X+0x%X\n",
+               full.effect_timing.fade_in_function, full.effect_timing.fade_out_function,
+               full.effect_timing.summon_fade_calls[0].instruction,
+               full.effect_timing.summon_fade_calls[0].target,
+               full.effect_timing.summon_fade_calls[1].instruction,
+               full.effect_timing.summon_fade_calls[1].target,
+               full.effect_timing.summon_fade_calls[2].instruction,
+               full.effect_timing.summon_fade_calls[2].target,
+               full.effect_timing.pulse_play_call.instruction,
+               full.effect_timing.pulse_color_function,
+               full.effect_timing.pulse_color_calls[0].instruction,
+               full.effect_timing.pulse_color_calls[1].instruction,
+               full.effect_timing.game_logic_pointer, full.effect_timing.logic_frame_offset);
         printf("  minimap look-at copies %u, view 0x%X\n",
                full.minimap.count, full.minimap.view_pointer);
         printf("  shroud fog row copy call 0x%X -> 0x%X\n",

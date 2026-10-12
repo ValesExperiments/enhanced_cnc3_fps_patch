@@ -188,6 +188,13 @@ Fix or remove anything that turns out to be wrong.
   calls to leaves that don't touch them (e.g. GameEngine_update relies on
   UpdatePhaseInterpolation keeping ECX). Route such hooks through a naked
   stub that saves what the original leaf preserved.
+  **This also applies to non-leaf functions whose callees are all direct
+  (no virtual calls):** MSVC's whole-program optimisation knows they keep
+  EDX. B15 crashed (2026-10-12): after `TintEnvelope::play` (TW 0x474C80)
+  the caller does `MOV ECX,EDX`. **Before redirecting any CALL, disassemble
+  the caller after the call** and check for reads of EAX/ECX/EDX/XMM that
+  weren't reloaded. Only an original that makes a virtual call is
+  guaranteed to clobber them.
 - **Don't predict the mouse from UI events.** CnC3's APT UI samples the
   cursor some time before its events reach C++ code, so extrapolating from
   live `GetCursorPos` stair-steps. For UI-driven 30 Hz camera moves, ease
@@ -218,6 +225,14 @@ Fix or remove anything that turns out to be wrong.
   Grep the XML first: `AnimationMode="MANUAL"` or `ImageSequence` tells you
   which kind an effect is. Full RE notes are in docs/goals_detailed.md
   (B12, B13).
+- **Mixed frame units (B14/B15, 2026-10-12).** Game code converts seconds to
+  frames in three different ways: with the *live* client FPS (correct at any
+  rate), into *logic* frames (`FUN_0046D567`), or as *30 Hz constants*. A
+  consumer that counts client frames is only wrong for the last two; a patch
+  that slows a consumer to 30 Hz steps (B9 TintEnvelope) breaks the first.
+  Fix at the **call site** by converting units, not globally. The patch
+  rewrites `client_fps_float` (TW 0xBF375C) and the client-FPS int to the
+  live rate, so code reading them produces live-rate frame counts.
 - **Quick signature prototyping:** `tools_and_docs_by_claude/sigscan/sigscan.py <script>` (venv python)
   maps all four game builds with pefile and offers `find`, `calls_to` and
   `hexdump`. It's much faster than iterating on the C resolver.

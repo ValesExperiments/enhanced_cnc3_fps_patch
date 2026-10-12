@@ -952,6 +952,73 @@ fine), so the code was removed.
 
 ---
 
+## B14. Summoned objects fade in too fast (Mothership)
+
+**Status:** implemented 2026-10-12, needs an in-game test.
+
+### Cause (TW 1.10 VAs)
+- `OCL_SummonMothership` (`Xml/GlobalData/ObjectCreationLists.xml`) creates
+  the Mothership with `Options="... FADE_IN"` and `FadeTime="15s"`.
+- The CreateObject routine (0x63D6B9) converts FadeTime to **logic frames**
+  (`FUN_0046D567`, 15 s → 225) and calls `Drawable::fadeIn(frames)`
+  (0x46E933; fade-out 0x46E8E1) at 0x63DF48 / 0x63E061 (in) and 0x63DFBA (out),
+  each `PUSH [EBP+0x58]; MOV ECX,[obj+Drawable]; CALL`.
+- The fade (`FUN_004730DB`, per frame from updateDrawable) adds elapsed
+  **client frames** (+0x21C) and sets opacity = elapsed / frames (+0x220).
+  Vanilla at 30 FPS: 225 frames ≈ 7.5 s; at 156 FPS ≈ 1.4 s.
+- Other fade callers: several convert seconds with the live client FPS
+  (correct), and a few pass small constants (10, 30, 138 frames: 0x4D3CBB,
+  0x6001A4, 0x570D45, 0x6383F2) that are also ~5x fast but short. Those are
+  not changed (not reported).
+
+### Fix
+- The 3 OCL fade calls go to `summon_fade_in/out`: frames × g_rate / 30, so
+  the fade keeps vanilla's duration and still advances every frame.
+- Resolver `resolve_effect_timing_sites`: fadeIn/fadeOut by signature; the
+  OCL calls are the only fade calls preceded by `FF 75 58 8B <ECX,[reg+0x1xx]>`
+  (Drawable offset 0x104 in TW, 0x108 in KW): exactly 2 in + 1 out within
+  0x200 bytes. Verified on all four builds.
+
+---
+
+## B15. Tiberium Vibration Scan highlight lasts 60+ s and pulses at 15 Hz
+
+**Status:** implemented 2026-10-12, needs an in-game test.
+
+### Cause (TW 1.10 VAs)
+- `RadarScanMapSpecialAbilityUpdate` (Scrin Control Center): `FUN_00632F4F`
+  converts the scan duration from logic frames to client frames with the
+  live client FPS (`× [clientFPS] / [logicFPS]`) and calls `FUN_005C5905`
+  per matching object, which sets the Drawable pulse (flag 0x20 at +0x158;
+  parameters at +0x198..+0x1B4 via `FUN_0046F38B`): yellow (1, 0.8, 0),
+  attack = decay = `client_fps_float` frames (1 s at the live rate),
+  sustain = duration, pulse amplitude 1.0, frequency 0.5.
+  `FUN_005CBF9D` is a second producer of such pulses (also live-rate frames).
+- `FUN_00478BA9` (per frame from updateDrawable) starts it with
+  `TintEnvelope::play(colour, attack, decay, sustain)` (0x474C80, call at
+  0x478D38) on the +0x194 envelope. B9 steps envelopes as if their counts were
+  30 Hz frames (sustain counts down per 30 Hz frame, attack/decay rates ×
+  30/rate), so a 13 s highlight lasted 13 × 156/30 ≈ 67 s.
+- The heartbeat: the envelope colour getter (0x46F478) returns
+  colour × (0.5 + sin(logicFrame × f) × a / 2), using the GameLogic frame
+  (`[0xBEE574]+0x38`), so it changed only per logic tick.
+
+### Fix
+- The play call goes to `play_tint_pulse_in_retail_frames`: attack, decay
+  and sustain × 30 / `client_fps_float` (≥ 1; huge "forever" values kept).
+  It goes through the naked stub `play_tint_pulse_entry`, which keeps EDX.
+  The first build crashed on the first scan (access violation at TW
+  0x46CCFB): the caller does `MOV ECX,EDX` after the call, relying on the
+  stock play leaving EDX (the colour pointer) intact.
+- Both getter calls (0x472F97, 0x472FD7) go to `tint_pulse_colour`, which
+  uses a logic frame that advances smoothly between updates (one update
+  behind; the tick length is measured; it stops when the logic pauses).
+- Signatures: the play site (`PUSH [ESI+…]` ×3, `LEA EDX`, `CALL`) and the
+  getter (its GameLogic operand must equal the particle gate's). Verified on
+  all four builds.
+
+---
+
 ## F2. 100% game speed at any frame rate
 
 **Status:** implemented 2026-10-12 (`adaptive_fps=1`, default on), needs an

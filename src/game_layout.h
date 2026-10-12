@@ -271,6 +271,41 @@ typedef struct WaypointLineLayout {
     u32 interpolated_transform_function;
 } WaypointLineLayout;
 
+enum { SUMMON_FADE_CALLS = 3, TINT_PULSE_COLOR_CALLS = 2 };
+
+typedef struct EffectTimingLayout {
+    /*
+     * Drawable::fadeIn / fadeOut(frames) (TW 1.10 VAs 0x46E933 / 0x46E8E1):
+     * opacity = elapsed / frames, elapsed counting client frames.
+     */
+    u32 fade_in_function;
+    u32 fade_out_function;
+    /*
+     * ObjectCreationList CreateObject with FADE_IN / FADE_OUT (e.g. the
+     * summoned Mothership, FadeTime 15 s): "PUSH [EBP+0x58]" (FadeTime in
+     * logic frames); MOV ECX,[obj+Drawable]; CALL fadeIn/fadeOut. Two fade-in
+     * calls and one fade-out call (TW 0x63DF48, 0x63E061, 0x63DFBA).
+     */
+    BranchSite summon_fade_calls[SUMMON_FADE_CALLS];
+    /*
+     * Drawable "pulse" tint (flag 0x20, e.g. Tiberium Vibration Scan):
+     * Drawable::updateDrawable's helper plays its TintEnvelope (+0x194) with
+     * TintEnvelope::play(colour*, attack, decay, sustain) (TW 0x478D38), the
+     * frame counts having been computed with the live client FPS.
+     */
+    BranchSite pulse_play_call;
+    /*
+     * TintEnvelope colour getter (TW 0x46F478): with a pulse (+0x3C amplitude,
+     * +0x40 frequency) it scales the colour by 0.5 + sin(logicFrame * f) *
+     * a / 2, so the pulse stepped with the logic. Both calls (TW 0x472F97,
+     * 0x472FD7) and its GameLogic pointer and frame offset.
+     */
+    u32 pulse_color_function;
+    BranchSite pulse_color_calls[TINT_PULSE_COLOR_CALLS];
+    u32 game_logic_pointer;
+    u32 logic_frame_offset;
+} EffectTimingLayout;
+
 typedef struct SelectionPanelLayout {
     /*
      * TacticalSelectionDetailsPanelImpl::SetUnitName (forwards only changed
@@ -340,6 +375,7 @@ typedef struct GameLayout {
     TintEnvelopeLayout tint_envelope;
     MinimapLayout minimap;
     WaypointLineLayout waypoint_lines;
+    EffectTimingLayout effect_timing;
 } GameLayout;
 
 typedef enum GameResolveResult {

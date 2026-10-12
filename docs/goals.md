@@ -34,6 +34,8 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | F2 | Game stays at 100% speed at any frame rate (even ~10 FPS) | Working (`adaptive_fps=1`); user: "feels better" (round 7) |
 | B12 | Tiberium crystals should grow and shrink (when harvested) smoothly | **Closed, kept vanilla** (2026-10-12): smoothing worked, but made the crystal glow flicker; user chose vanilla |
 | B13 | The "breathing" repair / power-off icons on buildings should animate smoothly | **Closed, kept vanilla** (2026-10-12): crossfade tried and reverted; pre-rendered 15 images/s |
+| B14 | Summoned objects (e.g. the Scrin Mothership) should fade in as slowly as in vanilla | Implemented 2026-10-12, **needs in-game test** |
+| B15 | Tiberium Vibration Scan highlight should last ~13 s (not 60+) and pulse smoothly | Implemented 2026-10-12, **needs in-game test** |
 
 ## Groundwork needed first
 
@@ -99,6 +101,14 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
   flicker every frame; the user preferred vanilla. The repair/power icons
   are 10 pre-rendered images at 15/s; a crossfade didn't look good, so
   they're vanilla too.
+- **B14:** The Mothership's summon fade is given in logic frames but counted
+  in rendered frames, so at 156 FPS it ran ~5x faster. The patch stretches
+  that frame count to the live rate; the fade stays smooth.
+- **B15:** The Vibration Scan's yellow highlight counts its time in
+  live-rate frames, but the B9 flash fix slows every flash to 30 Hz steps,
+  so it lasted ~5x too long. Its frames are now converted to 30 Hz frames.
+  Its heartbeat followed the logic frame (15x/s); it now follows a smoothly
+  advancing logic frame.
 - **F2:** The patch measured speed in frames, so a PC that couldn't hold the
   target ran the whole game slower. Now it measures each frame's work and,
   if needed, lowers the effective rate to what the PC can sustain, re-timing

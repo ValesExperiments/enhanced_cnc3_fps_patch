@@ -2565,6 +2565,187 @@ static void install_waypoint_lines(PatchInstaller *installer) {
                  sizeof(call_patch));
 }
 
+/* Milliseconds from the high-resolution counter. */
+static double precise_now_ms(void) {
+    LARGE_INTEGER now;
+
+    if (g_logic_timer_frequency.QuadPart == 0) {
+        QueryPerformanceFrequency(&g_logic_timer_frequency);
+    }
+    QueryPerformanceCounter(&now);
+    return (double)now.QuadPart * 1000.0 / (double)g_logic_timer_frequency.QuadPart;
+}
+
+/*
+ * B14: summoned objects fading in. An ObjectCreationList CreateObject with
+ * FADE_IN / FADE_OUT (e.g. the Scrin Mothership, FadeTime 15 s) converts its
+ * FadeTime to logic frames and passes them to Drawable::fadeIn/fadeOut, which
+ * count client frames: at 30 FPS 15 s became the familiar ~7.5 s fade, at
+ * 156 FPS about 1.4 s. These calls now get the frame count the same fade
+ * takes at the live rate (x rate / 30); the fade still advances every frame.
+ */
+typedef void(THISCALL *DrawableFadeFn)(void *drawable, u32 frames);
+static DrawableFadeFn g_original_fade_in;
+static DrawableFadeFn g_original_fade_out;
+
+static u32 retail_frames_at_live_rate(u32 frames) {
+    if (g_config->target_fps <= g_retail_visual_fps || frames == 0u) return frames;
+    return (u32)(((u64)frames * g_rate + g_retail_visual_fps / 2u) / g_retail_visual_fps);
+}
+
+static void THISCALL summon_fade_in(void *drawable, u32 frames) {
+    g_original_fade_in(drawable, retail_frames_at_live_rate(frames));
+}
+
+static void THISCALL summon_fade_out(void *drawable, u32 frames) {
+    g_original_fade_out(drawable, retail_frames_at_live_rate(frames));
+}
+
+/*
+ * B15: Drawable pulse tints (flag 0x20; e.g. the yellow highlight of the
+ * Tiberium Vibration Scan). Their attack/decay/sustain frame counts are
+ * computed with the live client FPS (seconds x clientFPS), but the
+ * TintEnvelope fix (B9) treats envelope frame counts as retail 30 Hz frames,
+ * like the game's other envelopes (e.g. 30-frame flashes): the scan's
+ * highlight lasted ~5x too long. The pulse's counts are converted to 30 Hz
+ * frames as it starts. Its heartbeat (colour x sin(logicFrame x f)) moved
+ * only with the logic frame; it now uses a logic frame that advances smoothly
+ * between logic updates (one update behind, pausing with the logic).
+ */
+typedef void(THISCALL *TintEnvelopePlayFn)(void *envelope, const float *colour, u32 attack,
+                                           u32 decay, u32 sustain);
+static TintEnvelopePlayFn g_original_tint_pulse_play;
+
+enum { TINT_PULSE_AMPLITUDE = 0x3C, TINT_PULSE_FREQUENCY = 0x40, TINT_PULSE_OUTPUT = 0x44,
+       TINT_ENVELOPE_COLOUR = 0x28 };
+
+static u32 live_frames_to_retail(u32 frames, float scale) {
+    float converted;
+
+    if (frames == 0u || frames >= 0x7FFFFFFFu) return frames;
+    converted = (float)frames * scale + 0.5f;
+    return converted < 1.0f ? 1u : (u32)converted;
+}
+
+static void THISCALL play_tint_pulse_in_retail_frames(void *envelope, const float *colour,
+                                                     u32 attack, u32 decay, u32 sustain) {
+    float live_fps = *(float *)game_address(g_game, g_game->timing.client_fps_float);
+    float scale;
+
+    if (g_config->target_fps <= g_retail_visual_fps || !(live_fps > 0.0f)) {
+        g_original_tint_pulse_play(envelope, colour, attack, decay, sustain);
+        return;
+    }
+    scale = (float)g_retail_visual_fps / live_fps;
+    g_original_tint_pulse_play(envelope, colour, live_frames_to_retail(attack, scale),
+                               live_frames_to_retail(decay, scale),
+                               live_frames_to_retail(sustain, scale));
+}
+
+/*
+ * The pulse's caller reuses EDX (the colour pointer) after the call, as the
+ * stock TintEnvelope::play leaves it untouched; C code may not. This stub
+ * keeps EDX across the wrapper (ECX = envelope, four stack arguments).
+ */
+__attribute__((naked)) static void play_tint_pulse_entry(void) {
+    __asm__ volatile(
+        "pushl %%edx\n\t"
+        "pushl 20(%%esp)\n\t"
+        "pushl 20(%%esp)\n\t"
+        "pushl 20(%%esp)\n\t"
+        "pushl 20(%%esp)\n\t"
+        "calll %c0\n\t"
+        "popl %%edx\n\t"
+        "retl $16"
+        :
+        : "i"(play_tint_pulse_in_retail_frames));
+}
+
+/* Logic frame advancing smoothly between updates, one update behind. */
+static u32 g_pulse_logic_frame;
+static double g_pulse_frame_ms;
+static double g_pulse_tick_ms = 1000.0 / 15.0;
+static BOOL g_pulse_frame_known;
+
+static double smooth_logic_frame(u32 frame) {
+    double now = precise_now_ms();
+    double progress;
+
+    if (!g_pulse_frame_known || frame != g_pulse_logic_frame) {
+        if (g_pulse_frame_known && frame == g_pulse_logic_frame + 1u) {
+            double interval = now - g_pulse_frame_ms;
+            if (interval < 20.0) interval = 20.0;
+            if (interval > 200.0) interval = 200.0;
+            g_pulse_tick_ms = interval;
+        }
+        g_pulse_logic_frame = frame;
+        g_pulse_frame_ms = now;
+        g_pulse_frame_known = TRUE;
+    }
+    progress = (now - g_pulse_frame_ms) / g_pulse_tick_ms;
+    if (progress > 1.0) progress = 1.0;
+    return (double)frame - 1.0 + progress;
+}
+
+static float *THISCALL tint_pulse_colour(u8 *envelope) {
+    const EffectTimingLayout *fx = &g_game->effect_timing;
+    float amplitude = *(float *)(envelope + TINT_PULSE_AMPLITUDE);
+    float frequency = *(float *)(envelope + TINT_PULSE_FREQUENCY);
+    const float *colour = (const float *)(envelope + TINT_ENVELOPE_COLOUR);
+    float *output = (float *)(envelope + TINT_PULSE_OUTPUT);
+    u8 *logic;
+    u32 frame;
+    double time;
+    float factor;
+
+    if (frequency == 0.0f || amplitude == 0.0f) return (float *)(envelope + TINT_ENVELOPE_COLOUR);
+    logic = *(u8 **)game_address(g_game, fx->game_logic_pointer);
+    frame = logic != NULL ? *(u32 *)(logic + fx->logic_frame_offset) : 0u;
+    time = g_config->target_fps <= g_retail_visual_fps ? (double)frame : smooth_logic_frame(frame);
+    factor = (float)(0.5 + sin(time * (double)frequency) * (double)amplitude * 0.5);
+    output[0] = colour[0] * factor;
+    output[1] = colour[1] * factor;
+    output[2] = colour[2] * factor;
+    return output;
+}
+
+static void install_effect_timing(PatchInstaller *installer) {
+    static const char *const fade_names[SUMMON_FADE_CALLS] = {
+        "summon fade call 1", "summon fade call 2", "summon fade call 3"
+    };
+    static const char *const colour_names[TINT_PULSE_COLOR_CALLS] = {
+        "tint pulse colour call 1", "tint pulse colour call 2"
+    };
+    const EffectTimingLayout *fx = &g_game->effect_timing;
+    u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
+    u32 i;
+
+    g_original_fade_in = (DrawableFadeFn)game_address(g_game, fx->fade_in_function);
+    g_original_fade_out = (DrawableFadeFn)game_address(g_game, fx->fade_out_function);
+    for (i = 0; i < SUMMON_FADE_CALLS; ++i) {
+        const BranchSite *site = &fx->summon_fade_calls[i];
+        encode_rel32(&call_patch[1], game_address(g_game, site->instruction + 5u),
+                     site->target == fx->fade_in_function ? (void *)summon_fade_in
+                                                          : (void *)summon_fade_out);
+        patch_branch(installer, fade_names[i], site, 0xE8, call_patch, sizeof(call_patch));
+    }
+
+    g_original_tint_pulse_play =
+        (TintEnvelopePlayFn)game_address(g_game, fx->pulse_play_call.target);
+    encode_rel32(&call_patch[1], game_address(g_game, fx->pulse_play_call.instruction + 5u),
+                 play_tint_pulse_entry);
+    patch_branch(installer, "tint pulse play call", &fx->pulse_play_call, 0xE8, call_patch,
+                 sizeof(call_patch));
+
+    for (i = 0; i < TINT_PULSE_COLOR_CALLS; ++i) {
+        encode_rel32(&call_patch[1],
+                     game_address(g_game, fx->pulse_color_calls[i].instruction + 5u),
+                     tint_pulse_colour);
+        patch_branch(installer, colour_names[i], &fx->pulse_color_calls[i], 0xE8, call_patch,
+                     sizeof(call_patch));
+    }
+}
+
 static void install_minimap_glide(PatchInstaller *installer) {
     static const char *const names[MINIMAP_LOOK_AT_MAX][MINIMAP_LOOK_AT_CALLS] = {
         { "minimap look-at call 1", "minimap look-at call 2" },
@@ -3415,6 +3596,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_tint_envelope_timing(&installer);
     install_minimap_glide(&installer);
     install_waypoint_lines(&installer);
+    install_effect_timing(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);
@@ -3507,6 +3689,7 @@ void game_patches_reset_state(void) {
         g_frame_times_logged = 0;
         g_trail_draws_logged = 0;
         memset(g_trail_history, 0, sizeof(g_trail_history));
+        g_pulse_frame_known = FALSE;
         reset_keyboard_clock();
         /* First direct reader gets floor(990/FPS); the hook distributes remainder. */
         *(u32 *)game_address(g_game, g_game->timing.w3d_milliseconds_per_frame) =

@@ -1757,6 +1757,121 @@ static BOOL resolve_waypoint_line_sites(
            lines->object_position < 0x100u;
 }
 
+/* Drawable::fadeIn(frames): mode 1 (in), elapsed 0, opacity 0. */
+static const u16 g_drawable_fade_in_pattern[] = {
+    0x8B, 0x44, 0x24, 0x04, 0x85, 0xC0, 0x56, 0x8B, 0xF1, 0x75, 0x10,
+    0xF3, 0x0F, 0x10, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x21, 0x86, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0xEB, 0x0D, 0x0F, 0x57, 0xC0,
+    0xC7, 0x86, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x83, 0xA6, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0x00
+};
+/* Drawable::fadeOut(frames): mode 2 (out), elapsed 0, opacity 1. */
+static const u16 g_drawable_fade_out_pattern[] = {
+    0x8B, 0x44, 0x24, 0x04, 0x85, 0xC0, 0x56, 0x8B, 0xF1, 0x75, 0x0B,
+    0x0F, 0x57, 0xC0, 0x21, 0x86, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0xEB, 0x12,
+    0xF3, 0x0F, 0x10, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0xC7, 0x86, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x83, 0xA6, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0x00
+};
+/* OCL fade call prefix: PUSH [EBP+0x58]; MOV ECX,[reg+Drawable (0x1xx)]. */
+static const u8 g_summon_fade_push[] = { 0xFF, 0x75, 0x58, 0x8B };
+/*
+ * Drawable pulse: PUSH sustain; MOV ECX,[ESI+envelope]; PUSH decay;
+ * LEA EDX,[ESI+colour]; PUSH attack; PUSH EDX; CALL TintEnvelope::play (+31).
+ */
+static const u16 g_tint_pulse_play_pattern[] = {
+    0xFF, 0xB6, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0x8B, 0x8E, PATTERN_ANY, PATTERN_ANY,
+    0x00, 0x00, 0xFF, 0xB6, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0x8D, 0x96, PATTERN_ANY,
+    PATTERN_ANY, 0x00, 0x00, 0xFF, 0xB6, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0x52, 0xE8
+};
+/*
+ * TintEnvelope colour getter: if frequency (+0x40) and amplitude (+0x3C)
+ * are non-zero, copy the colour (+0x28) to +0x44 and scale it by
+ * sin(GameLogic frame * f). GameLogic pointer at +54, frame offset at +60.
+ */
+static const u16 g_tint_pulse_color_pattern[] = {
+    0x51, 0xF3, 0x0F, 0x10, 0x49, 0x40, 0x0F, 0x57, 0xC0, 0x0F, 0x2E, 0xC8, 0x9F,
+    0xF6, 0xC4, 0x44, 0x7B, PATTERN_ANY, 0xF3, 0x0F, 0x10, 0x49, 0x3C, 0x0F, 0x2E, 0xC8,
+    0x9F, 0xF6, 0xC4, 0x44, 0x7B, PATTERN_ANY, 0xD9, 0x41, 0x28, 0x8D, 0x41, 0x44,
+    0xD9, 0x18, 0xD9, 0x41, 0x2C, 0xD9, 0x58, 0x04, 0xD9, 0x41, 0x30, 0xD9, 0x58, 0x08,
+    0x8B, 0x15, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B, 0x52, PATTERN_ANY
+};
+
+enum { SUMMON_FADE_SPAN = 0x200u };
+
+/* Fade calls preceded by PUSH [EBP+0x58]; MOV ECX,[reg+0x1xx]. */
+static BOOL is_summon_fade_call(const u8 *module, u32 instruction) {
+    /* FF 75 58 | 8B modrm(ECX, [reg+disp32]) | disp32 = 0x000001xx | E8 */
+    return instruction >= 9u &&
+           memcmp(module + instruction - 9u, g_summon_fade_push, sizeof(g_summon_fade_push)) == 0 &&
+           (module[instruction - 5u] & 0xF8u) == 0x88u && module[instruction - 5u] != 0x8Cu &&
+           module[instruction - 3u] == 0x01 && module[instruction - 2u] == 0x00 &&
+           module[instruction - 1u] == 0x00;
+}
+
+static BOOL resolve_effect_timing_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    EffectTimingLayout *fx = &game->effect_timing;
+    u32 image_size = game->pe_size_of_image;
+    BranchSite calls[32];
+    u32 count;
+    u32 found = 0;
+    u32 fade_ins = 0;
+    u32 first = 0;
+    u32 match;
+    u32 i;
+    u32 pass;
+
+    if (!FIND_UNIQUE(module, nt, g_drawable_fade_in_pattern, &fx->fade_in_function) ||
+        !FIND_UNIQUE(module, nt, g_drawable_fade_out_pattern, &fx->fade_out_function)) {
+        return FALSE;
+    }
+    for (pass = 0; pass < 2u; ++pass) {
+        u32 target = pass == 0u ? fx->fade_in_function : fx->fade_out_function;
+        if (!find_branches_to(module, nt, image_size, target, calls, ARRAY_COUNT(calls), &count)) {
+            return FALSE;
+        }
+        for (i = 0; i < count; ++i) {
+            if (module[calls[i].instruction] != 0xE8 ||
+                !is_summon_fade_call(module, calls[i].instruction)) {
+                continue;
+            }
+            if (found >= SUMMON_FADE_CALLS) return FALSE;
+            fx->summon_fade_calls[found++] = calls[i];
+            if (pass == 0u) ++fade_ins;
+        }
+    }
+    if (found != SUMMON_FADE_CALLS || fade_ins != 2u) return FALSE;
+    /* All three belong to one CreateObject routine. */
+    first = fx->summon_fade_calls[0].instruction;
+    for (i = 1; i < SUMMON_FADE_CALLS; ++i) {
+        u32 at = fx->summon_fade_calls[i].instruction;
+        u32 distance = at > first ? at - first : first - at;
+        if (distance >= SUMMON_FADE_SPAN) return FALSE;
+    }
+
+    if (!FIND_UNIQUE(module, nt, g_tint_pulse_play_pattern, &match)) return FALSE;
+    fx->pulse_play_call.instruction = match + 31u;
+    if (!decode_relative_target(module, image_size, fx->pulse_play_call.instruction, 0xE8,
+                                &fx->pulse_play_call.target)) {
+        return FALSE;
+    }
+
+    if (!FIND_UNIQUE(module, nt, g_tint_pulse_color_pattern, &fx->pulse_color_function) ||
+        !read_absolute_rva(module, image_size, fx->pulse_color_function + 54u,
+                           &fx->game_logic_pointer) ||
+        !find_branches_to(module, nt, image_size, fx->pulse_color_function,
+                          fx->pulse_color_calls, TINT_PULSE_COLOR_CALLS, &count) ||
+        count != TINT_PULSE_COLOR_CALLS ||
+        module[fx->pulse_color_calls[0].instruction] != 0xE8 ||
+        module[fx->pulse_color_calls[1].instruction] != 0xE8) {
+        return FALSE;
+    }
+    fx->logic_frame_offset = module[fx->pulse_color_function + 60u];
+    /* Same GameLogic singleton as the particle gate's. */
+    return fx->game_logic_pointer == game->particle_draw.game_logic_pointer;
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -1974,6 +2089,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_tint_envelope_sites(module, nt, &game) ||
         !resolve_minimap_sites(module, nt, &game) ||
         !resolve_waypoint_line_sites(module, nt, &game) ||
+        !resolve_effect_timing_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||
