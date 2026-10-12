@@ -150,6 +150,7 @@ static int check(const char *path) {
         { "particle_list", resolve_particle_list_sites },
         { "trail_vertices", resolve_trail_vertex_sites },
         { "frame_boundary", resolve_frame_boundary_sites },
+        { "range_query", resolve_range_query_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -243,6 +244,11 @@ static int check(const char *path) {
                full.particle_list.list_offset, full.particle_list.key_offset);
         printf("  trail vertex read-back 0x%X\n", full.trail_vertices.readback);
         printf("  IsClientFrameBoundary 0x%X\n", full.frame_boundary.function);
+        printf("  range query 0x%X calls 0x%X 0x%X 0x%X, distance table 0x%X, add call 0x%X->0x%X\n",
+               full.range_query.query_function, full.range_query.query_calls[0].instruction,
+               full.range_query.query_calls[1].instruction,
+               full.range_query.query_calls[2].instruction, full.range_query.distance_table,
+               full.range_query.add_call.instruction, full.range_query.add_call.target);
         printf("  particle sibling search setup 0x%X, mismatch jump 0x%X\n",
                full.particle_list.sibling_setup, full.particle_list.sibling_mismatch);
         printf("  minimap look-at copies %u, view 0x%X\n",

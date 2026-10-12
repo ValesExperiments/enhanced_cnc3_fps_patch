@@ -408,6 +408,73 @@ allocator lock to be shared safely, for at most ~6%. On hold. M2-lite (render
 overlap) and M4 (range queries, ~13% now that logic is 78% of the main
 thread) are larger.
 
+## 4i. M4: range queries (investigated 2026-10-12)
+
+**Finer-rates test first** (`temp/profile5`, TW 1.9 heavy): rates such as 22,
+33, 49, 73, 63, 28, 21, 14 and 9 were used, with game ticks ~100%. Nothing
+abnormal. The main loop's limiter wait grew (call site `0x62EBA3` 12.6% vs
+5.3%) because pacing now settles at ~85–90% load instead of jumping 15↔30.
+That time is idle, not work.
+
+**Code** (identical in all four builds; TW 1.10 / TW 1.9 / KW 1.03 / KW 1.02):
+- Query `0x9E30ED` / `0x98F1F7` / `0x969FFA` / `0x951EA2`.
+- Tree walk `0x9E234A` / `0x98E360` / `0x969258` / `0x9510FF`.
+- 2D distance `0x9E2113` / `0x98E129` / `0x969021` / `0x950EC8`.
+- 3D distance `0x9E21B8` / `0x98E1CE` / `0x9690C6` / `0x950F6D`.
+
+**How a query works:**
+- It visits up to 21 per-category loose quadtrees (a bit mask).
+- For each tree it walks the cells overlapping the query rectangle
+  (implicit layout; children at `+2`, `+uVar·2/4/6`).
+- For each entry in a visited cell: a geometry virtual call, then a distance
+  callback (rejects when `d² − (r_obj + r)² > 0`). Accepted entries go
+  through `getObject` (virtual +8) and the filters, then a vector push_back
+  (`0x9E1DE5`, O(1)).
+
+**Who calls it** (heavy 1.9 profile; inclusive share at each call site):
+
+| Caller | Share | What |
+|---|---|---|
+| `0x73D306` | 8.6% | Weapon area nuggets: DamageNugget, FireOnObjectsNugget, TintObjectsNugget, DamageAndSpawnNugget (every impact) |
+| `0x6FAEA1` | 6.0% | AttributeModifierNugget (area buffs/debuffs) |
+| `0x6E9027` | 2.7% | PassiveAreaEffectBehavior (e.g. Tiberium crystals healing nearby units) |
+
+The time is spread over the walk and the distance callbacks (no instruction
+holds more than 15–24%): memory-bound pointer chasing, not a single slow
+spot.
+
+**Options (all must keep results and their order bit-identical):**
+- **A. Cheap pre-check** before the geometry call and distance callback: skip
+  entries that are provably out of range, using a bound on object radius.
+  Survivors still go through the original callback. Exact. The gain is
+  limited (the candidate's position load, the main cache miss, stays):
+  roughly 2–3%.
+- **B. Split big queries over cores by category tree** and concatenate the
+  results in category order. Exact. Each split costs a thread hand-off, so
+  it only pays off for large queries. Query counts and sizes need measuring
+  first.
+- **C. Measure first:** count queries, candidates tested and accepted per
+  caller (one test run), then pick A and/or B. **Chosen by the user.**
+
+**M4 diagnostic** (`src_multicore/range_stats.c`; installed only with
+`profiler=1`; nothing about the queries changes):
+- The three query CALLs go to `range_stats_query_stub`. It records
+  `[EBP+4]` of the thin wrapper (the system that asked) and jumps to a
+  thiscall wrapper that times the original with QPC.
+- The 5 distance-callback table entries become counting stubs (`INC
+  counter; JMP original`). The walk's add-result CALL goes through a
+  counting stub too.
+- Every 60 s fps_patch.log gets three kinds of lines:
+  - "Range queries": count, query/s, ms/s inside queries, candidates and
+    accepted per query, the largest query;
+  - "Range query sizes": queries and ms/s per candidates-per-query bucket
+    (0, 1–8, 9–32, 33–128, 129–512, 513–2048, 2049+);
+  - the top 8 "range caller" lines (caller RVA, queries, ms/s, candidates and
+    accepted per query).
+- Resolver `resolve_range_query_sites`: query and walk by signature, exactly
+  3 query calls, the table from the query's `PUSH [EAX*4+table]`, and the
+  add call from its 14-byte prefix in the walk. Verified on all four builds.
+
 ## 5. Options in detail
 
 ### A. Profiler (prerequisite) — built 2026-10-12

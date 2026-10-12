@@ -3,6 +3,7 @@
 #include "log.h"
 #include "memory_patch.h"
 #include "particle_index.h"
+#include "range_stats.h"
 #include "render_fixes.h"
 #include "profiler.h"
 
@@ -2934,6 +2935,49 @@ static void install_frame_boundary(PatchInstaller *installer) {
     patch_bytes(installer, "IsClientFrameBoundary entry", rva, expected, jump, sizeof(jump));
 }
 
+/*
+ * src_multicore M4 diagnostic (profiler=1 only): count and time the range
+ * queries per caller without changing them (range_stats.c).
+ */
+static void install_range_stats(PatchInstaller *installer) {
+    static const char *const call_names[RANGE_QUERY_CALLS] = {
+        "range query call 1", "range query call 2", "range query call 3"
+    };
+    static const char *const table_names[RANGE_DISTANCE_TABLE_ENTRIES] = {
+        "range distance callback 1", "range distance callback 2", "range distance callback 3",
+        "range distance callback 4", "range distance callback 5"
+    };
+    const RangeQueryLayout *range = &g_game->range_query;
+    RangeStatsSetup setup;
+    u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
+    u32 i;
+
+    if (!g_config->profiler) return;
+    setup.game_module = g_game->module;
+    setup.query = (RangeQueryFn)game_address(g_game, range->query_function);
+    for (i = 0; i < RANGE_DISTANCE_TABLE_ENTRIES; ++i) {
+        setup.distance[i] = *(void **)game_address(g_game, range->distance_table + 4u * i);
+    }
+    setup.add_result = game_address(g_game, range->add_call.target);
+    range_stats_setup(&setup);
+
+    for (i = 0; i < RANGE_QUERY_CALLS; ++i) {
+        encode_rel32(&call_patch[1],
+                     game_address(g_game, range->query_calls[i].instruction + 5u),
+                     range_stats_query_stub);
+        patch_branch(installer, call_names[i], &range->query_calls[i], 0xE8, call_patch,
+                     sizeof(call_patch));
+    }
+    for (i = 0; i < RANGE_DISTANCE_TABLE_ENTRIES; ++i) {
+        patch_pointer(installer, table_names[i], range->distance_table + 4u * i,
+                      setup.distance[i], g_range_distance_stubs[i]);
+    }
+    encode_rel32(&call_patch[1], game_address(g_game, range->add_call.instruction + 5u),
+                 range_stats_add_stub);
+    patch_branch(installer, "range add-result call", &range->add_call, 0xE8, call_patch,
+                 sizeof(call_patch));
+}
+
 static void install_minimap_glide(PatchInstaller *installer) {
     static const char *const names[MINIMAP_LOOK_AT_MAX][MINIMAP_LOOK_AT_CALLS] = {
         { "minimap look-at call 1", "minimap look-at call 2" },
@@ -3269,6 +3313,7 @@ static void monitor_frame_pacing(u32 interval_ms) {
                        seconds, stats.finds, stats.hits, stats.misses, stats.rebuilds,
                        stats.sibling_searches, stats.verify_mismatches, stats.split_groups,
                        stats.entries);
+            if (g_config->profiler) range_stats_report(log_printf, seconds);
         }
         log_printf("Adaptive pacing [%us]: %u FPS, frames %.0f%%, game ticks %.0f%%, "
                    "logic %.0f ms/s, effects %.0f ms/s, drawing %.2f ms/frame, load %.0f%%",
@@ -3794,6 +3839,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_particle_index(&installer);
     install_trail_vertex_fix(&installer);
     install_frame_boundary(&installer);
+    install_range_stats(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);

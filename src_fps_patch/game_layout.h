@@ -49,6 +49,22 @@ typedef struct KeyboardLayout {
     BranchSite check_repeat;
 } KeyboardLayout;
 
+enum { RANGE_QUERY_CALLS = 3, RANGE_DISTANCE_TABLE_ENTRIES = 5 };
+
+typedef struct RangeQueryLayout {
+    /*
+     * src_multicore M4 diagnostic. The partition manager's range query (TW
+     * 1.10 VA 0x9E30ED, thiscall, 7 arguments, RET 0x1C) is called only from
+     * three thin wrappers with EBP frames; its distance callbacks are a
+     * 5-entry pointer table (TW 0xBDF528); the tree walk adds each accepted
+     * object with one CALL (TW 0x9E2453 -> 0x9E1DE5).
+     */
+    u32 query_function;
+    BranchSite query_calls[RANGE_QUERY_CALLS];
+    u32 distance_table;
+    BranchSite add_call;
+} RangeQueryLayout;
+
 typedef struct FrameBoundaryLayout {
     /*
      * GameEngine::IsClientFrameBoundary (TW 1.10 VA 0x548131, 8 callers):
@@ -438,6 +454,7 @@ typedef struct GameLayout {
     ParticleListLayout particle_list;
     TrailVertexLayout trail_vertices;
     FrameBoundaryLayout frame_boundary;
+    RangeQueryLayout range_query;
 } GameLayout;
 
 typedef enum GameResolveResult {

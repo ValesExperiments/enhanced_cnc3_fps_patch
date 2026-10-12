@@ -2006,6 +2006,72 @@ static BOOL resolve_frame_boundary_sites(
            module[game->frame_boundary.function + 42u] == 0x40u;
 }
 
+/* Partition range query and its tree walk (identical in all four builds). */
+static const u16 g_range_query_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x28, 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x4D, 0x08, 0x57,
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B, 0x45, 0x18, 0x85, 0xC0,
+    0x74, 0x18, 0x83, 0xF8, 0x02, 0x74, 0x13, 0x83, 0xF8, 0x01, 0x74, 0x0E, 0x83, 0xF8, 0x03,
+    0x74
+};
+static const u16 g_range_walk_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x51, 0x53, 0x8B, 0x5D, 0x0C, 0x56, 0x8B, 0x75, 0x30, 0x57, 0x8B, 0x7D,
+    0x10, 0x89, 0x4D, 0xFC, 0x8B, 0x4B, 0x04, 0x85, 0xC9, 0x89, 0x4D, 0x30, 0x0F, 0x84,
+    PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0xEB, 0x03, 0x8B, 0x4D, 0x30, 0x8B, 0x06, 0x85, 0xC0,
+    0x74
+};
+/* Walk: FLD [EBP+0x10]; PUSH ECX; MOV ECX,[EBP+8]; FSTP [ESP]; PUSH [EBP+0xC]; CALL add. */
+static const u8 g_range_add_prefix[] = {
+    0xD9, 0x45, 0x10, 0x51, 0x8B, 0x4D, 0x08, 0xD9, 0x1C, 0x24, 0xFF, 0x75, 0x0C, 0xE8
+};
+
+static BOOL resolve_range_query_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    RangeQueryLayout *range = &game->range_query;
+    u32 image_size = game->pe_size_of_image;
+    u32 walk;
+    u32 count;
+    u32 offset;
+    u32 i;
+
+    if (!FIND_UNIQUE(module, nt, g_range_query_pattern, &range->query_function) ||
+        !FIND_UNIQUE(module, nt, g_range_walk_pattern, &walk) ||
+        !find_branches_to(module, nt, image_size, range->query_function, range->query_calls,
+                          RANGE_QUERY_CALLS, &count) ||
+        count != RANGE_QUERY_CALLS) {
+        return FALSE;
+    }
+    for (i = 0; i < RANGE_QUERY_CALLS; ++i) {
+        if (module[range->query_calls[i].instruction] != 0xE8) return FALSE;
+    }
+    /* PUSH [EAX*4 + table] in the query's first 0x200 bytes. */
+    range->distance_table = 0;
+    for (offset = 0; offset + 7u < 0x200u; ++offset) {
+        const u8 *p = module + range->query_function + offset;
+        if (p[0] == 0xFF && p[1] == 0x34 && p[2] == 0x85) {
+            if (!read_absolute_rva(module, image_size, range->query_function + offset + 3u,
+                                   &range->distance_table)) {
+                return FALSE;
+            }
+            break;
+        }
+    }
+    if (range->distance_table == 0u) return FALSE;
+    for (i = 0; i < RANGE_DISTANCE_TABLE_ENTRIES; ++i) {
+        u32 entry;
+        if (!read_absolute_rva(module, image_size, range->distance_table + 4u * i, &entry)) {
+            return FALSE;
+        }
+    }
+    for (offset = 0; offset + sizeof(g_range_add_prefix) + 4u < 0x240u; ++offset) {
+        if (memcmp(module + walk + offset, g_range_add_prefix, sizeof(g_range_add_prefix)) == 0) {
+            range->add_call.instruction = walk + offset + sizeof(g_range_add_prefix) - 1u;
+            return decode_relative_target(module, image_size, range->add_call.instruction, 0xE8,
+                                          &range->add_call.target);
+        }
+    }
+    return FALSE;
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -2227,6 +2293,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_particle_list_sites(module, nt, &game) ||
         !resolve_trail_vertex_sites(module, nt, &game) ||
         !resolve_frame_boundary_sites(module, nt, &game) ||
+        !resolve_range_query_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

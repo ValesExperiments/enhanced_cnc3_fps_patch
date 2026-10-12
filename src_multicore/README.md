@@ -25,3 +25,6 @@ Status: research phase. Findings are in `docs/multicore.md` (summary) and
 - `render_fixes.c` / `render_fixes.h`: M3a, the trail vertex builder
   recomputes a texture coordinate instead of reading it back from GPU memory
   (`multicore_trail_fix=1`, default).
+- `range_stats.c` / `range_stats.h`: M4 diagnostic. With `profiler=1` it
+  counts and times the partition range queries per caller ("Range queries"
+  lines in fps_patch.log). It doesn't change any results.

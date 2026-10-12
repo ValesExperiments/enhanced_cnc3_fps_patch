@@ -17,7 +17,8 @@ SOURCES := \
 MULTICORE_SOURCES := \
 	src_multicore/profiler.c \
 	src_multicore/particle_index.c \
-	src_multicore/render_fixes.c
+	src_multicore/render_fixes.c \
+	src_multicore/range_stats.c
 
 HEADERS := $(wildcard src_fps_patch/*.h) $(wildcard src_multicore/*.h)
 

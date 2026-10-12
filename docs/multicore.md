@@ -64,9 +64,9 @@ Every step must work on TW 1.10, TW 1.9, KW 1.03 and KW 1.02.
 | M1 | Particle-effect list: find the insertion point instantly instead of searching the whole list | ~7% of the main thread | **done**: 0 mismatches in ~435,000 checks in a heavy TW 1.9 battle |
 | M3a | Trail drawing: stop reading a value back from GPU memory for every trail point (found by the profiler: it *was* the whole trail cost) | ~7% light games, ~11% heavy | **done** (gone from the profile) |
 | M1b | A particle effect's first draw: look only at effects of its own kind instead of the whole list | ~3% heavy | **done**: 0 mismatches, 0 split groups |
-| M3 | Remaining particle work on other cores (CPU particle steps, particle drawing) | at most ~6% heavy (the whole effects zone is 6.6%, spread thin) | measured; on hold: small gain, needs thread-safe RNG/pools |
+| M3 | Remaining particle work on other cores (CPU particle steps, particle drawing) | at most ~6% heavy (the whole effects zone is 6.6%, spread thin) | **closed** (user, 2026-10-12) |
 | M2 | Game logic beside the 3D scene render ("M2-lite") | ~10–15% (~25–30% in light games), high risk | after M3 |
-| M4 | Faster "find objects near me" range searches (results must stay identical) | ~10% of logic | planned |
+| M4 | Faster "find objects near me" range searches (results must stay identical) | ~9.5% heavy (search code) + callers | **investigated**: no algorithmic bug; options in multicore_detailed.md §4i |
 
 ## Options, best first
 
