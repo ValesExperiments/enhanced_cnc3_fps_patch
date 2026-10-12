@@ -35,6 +35,12 @@ void particle_index_reset(void);
 u8 *particle_index_find(u8 *manager, u8 *system);
 /* Naked replacement for the scan (see particle_index.c for registers). */
 void particle_index_scan_stub(void);
+/*
+ * M1b: first node of a key's group (index, or one walk), or the head.
+ * Called by particle_index_sibling_stub from a system's first draw.
+ */
+u8 *particle_index_group_first(u8 *list, u32 key);
+void particle_index_sibling_stub(void);
 /* Wrappers for the list's insert CALL and the three erase CALLs. */
 u8 *THISCALL particle_index_insert(void *list, u8 **out, u8 *where, void *value);
 u32 THISCALL particle_index_erase(void *manager, u8 **iterator);
@@ -46,6 +52,8 @@ typedef struct ParticleIndexStats {
     u32 rebuilds;
     u32 verify_mismatches;
     u32 entries;
+    u32 sibling_searches;
+    u32 split_groups;     /* verify: a key's systems weren't contiguous */
 } ParticleIndexStats;
 
 /* Returns and clears the counters. */

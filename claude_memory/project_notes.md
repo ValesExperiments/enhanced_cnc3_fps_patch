@@ -29,9 +29,16 @@ Fix or remove anything that turns out to be wrong.
   `docs/multicore_detailed.md`. The user's recent test logs come from
   **TW 1.9**. The user made it Large Address Aware with the 4 GB patcher on
   2026-10-12 (only the LAA flag and the checksum changed; the patch still resolves).
-- **Multi-core roadmap (agreed 2026-10-12):** M1 particle-list index →
-  M2 logic on its own core → M3 trail vertex builder → M4 range queries. The
-  status is in `docs/multicore.md`. Test any list/index replacement offline
+- **Multi-core roadmap (agreed 2026-10-12, reordered):** M1 particle-list
+  index (done) → M3 particle/trail work on other cores → M2-lite (logic
+  beside the scene render only; full logic threading is infeasible, because
+  logic writes Drawables directly, see docs §4d) → M4 range queries. The
+  status is in `docs/multicore.md`.
+  **Profiler trick:** if all of one function's samples land on a single
+  instruction, look at the load just before it. M3a found a CPU read *from a
+  locked GPU vertex buffer* this way (trail builder, 7–11% of the frame). Check
+  with the per-RVA exclusive counts in fps_profile.log.
+  Test any list/index replacement offline
   first, against the original algorithm with random operations (see
   `temp/particle_index_test`), and give the user a `multicore_verify=1` mode
   for in-game proof.

@@ -13,6 +13,7 @@ void config_set_defaults(Config *config) {
     config->profiler_report_seconds = 60;
     config->multicore_particle_index = TRUE;
     config->multicore_verify = FALSE;
+    config->multicore_trail_fix = TRUE;
 }
 
 BOOL config_load(Config *config, const wchar_t *path) {
@@ -51,5 +52,7 @@ BOOL config_load(Config *config, const wchar_t *path) {
         L"fps_patch", L"multicore_particle_index", config->multicore_particle_index, path) != 0;
     config->multicore_verify = GetPrivateProfileIntW(
         L"fps_patch", L"multicore_verify", config->multicore_verify, path) != 0;
+    config->multicore_trail_fix = GetPrivateProfileIntW(
+        L"fps_patch", L"multicore_trail_fix", config->multicore_trail_fix, path) != 0;
     return TRUE;
 }

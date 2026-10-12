@@ -24,6 +24,8 @@ typedef struct Config {
     BOOL multicore_particle_index;
     /* Diagnostic: also run the original searches and count disagreements. */
     BOOL multicore_verify;
+    /* src_multicore M3a: no GPU-memory read in the trail vertex builder. */
+    BOOL multicore_trail_fix;
 } Config;
 
 void config_set_defaults(Config *config);

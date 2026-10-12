@@ -268,6 +268,73 @@ __attribute__((naked)) void particle_index_scan_stub(void) {
         : "i"(particle_index_find));
 }
 
+/* Number of separate runs of `key` in the list (1 when contiguous). */
+static u32 count_runs(u8 *head, u32 key) {
+    u8 *node = node_next(head);
+    u32 runs = 0;
+    BOOL inside = FALSE;
+    u32 steps = 0;
+
+    while (node != head && steps++ < WALK_LIMIT) {
+        u32 node_k;
+        BOOL match = node_key(node, &node_k) && node_k == key;
+        if (match && !inside) ++runs;
+        inside = match;
+        node = node_next(node);
+    }
+    return runs;
+}
+
+u8 *particle_index_group_first(u8 *list, u32 key) {
+    u8 *manager = list - g_setup.list_offset;
+    u8 *head = *(u8 **)list;
+    u8 *result = NULL;
+
+    ++g_stats.sibling_searches;
+    if (g_setup.enabled && g_valid && manager == g_manager) {
+        IndexEntry *entry = lookup(key);
+        u32 first_key;
+        /* The system being set up is in the list, so its key is too. */
+        if (entry != NULL && entry->first != NULL && linked(entry->first) &&
+                   node_key(entry->first, &first_key) && first_key == key) {
+            result = entry->first;
+        }
+    }
+    if (result == NULL) result = walk(head, key);
+    if (g_setup.verify) {
+        if (result != walk(head, key)) {
+            ++g_stats.verify_mismatches;
+            result = walk(head, key);
+        }
+        if (count_runs(head, key) > 1u) ++g_stats.split_groups;
+    }
+    return result;
+}
+
+/*
+ * Replaces "MOV EAX,[EBX]; PUSH EDI; MOV EDI,[EAX]; CMP EDI,EAX; JZ end" with
+ * "PUSH EDI; CALL stub; JZ end; NOP". In: EBX = the list, [EBP-4] = key.
+ * Out: EAX = head, EDI = the key's first node (the loop then stops at the
+ * first node with another key; groups are contiguous), flags = CMP EDI,EAX.
+ */
+__attribute__((naked)) void particle_index_sibling_stub(void) {
+    __asm__ volatile(
+        "pushl %%ecx\n\t"
+        "pushl %%edx\n\t"
+        "pushl -4(%%ebp)\n\t"
+        "pushl %%ebx\n\t"
+        "calll %c0\n\t"
+        "addl $8, %%esp\n\t"
+        "movl %%eax, %%edi\n\t"
+        "movl (%%ebx), %%eax\n\t"
+        "popl %%edx\n\t"
+        "popl %%ecx\n\t"
+        "cmpl %%eax, %%edi\n\t"
+        "retl"
+        :
+        : "i"(particle_index_group_first));
+}
+
 ParticleIndexStats particle_index_take_stats(void) {
     ParticleIndexStats stats = g_stats;
     stats.entries = g_live;

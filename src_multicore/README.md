@@ -20,4 +20,8 @@ Status: research phase. Findings are in `docs/multicore.md` (summary) and
 - `particle_index.c` / `particle_index.h`: M1, an instant insertion point for
   the particle manager's list (replaces a full-list search when a particle
   effect is created). `multicore_particle_index=1` (default);
-  `multicore_verify=1` checks it against the original search.
+  `multicore_verify=1` checks it against the original search. Also M1b
+  (a system's first-draw sibling search only looks at its own group).
+- `render_fixes.c` / `render_fixes.h`: M3a, the trail vertex builder
+  recomputes a texture coordinate instead of reading it back from GPU memory
+  (`multicore_trail_fix=1`, default).

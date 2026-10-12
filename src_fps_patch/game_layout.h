@@ -329,7 +329,30 @@ typedef struct ParticleListLayout {
     BranchSite erase_calls[PARTICLE_ERASE_CALLS];
     u32 list_offset;
     u32 key_offset;
+    /*
+     * M1b. A particle system's first draw (TW 1.10 VA 0x5BF76B) walks the
+     * whole list for another system with the same key whose render data is
+     * set up, to share it. `sibling_setup` is its "MOV EAX,[EBX]; PUSH EDI;
+     * MOV EDI,[EAX]; CMP EDI,EAX; JZ end" (9 bytes; EBX = list, [EBP-4] =
+     * key); `sibling_mismatch` is the rel8 of its "key differs: next node"
+     * JNZ (0x27), which becomes 0x3B (leave the loop).
+     */
+    u32 sibling_setup;
+    u32 sibling_mismatch;
 } ParticleListLayout;
+
+typedef struct TrailVertexLayout {
+    /*
+     * src_multicore M3a. The trail vertex builder (TW 1.10 VA 0x5BA171,
+     * called by TrailDrawModule_Draw) writes two vertices per trail point
+     * into the locked GPU vertex buffer and copies the first vertex's V
+     * texture coordinate into the second by reading it back from the buffer:
+     * "FLD [ECX+4]; FSTP [EAX+ESI+4]" (7 bytes at `readback`). Reading
+     * GPU-visible memory is extremely slow; all of the builder's profile
+     * samples landed right after this load.
+     */
+    u32 readback;
+} TrailVertexLayout;
 
 typedef struct SelectionPanelLayout {
     /*
@@ -402,6 +425,7 @@ typedef struct GameLayout {
     WaypointLineLayout waypoint_lines;
     EffectTimingLayout effect_timing;
     ParticleListLayout particle_list;
+    TrailVertexLayout trail_vertices;
 } GameLayout;
 
 typedef enum GameResolveResult {

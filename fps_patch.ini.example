@@ -44,3 +44,8 @@ multicore_particle_index=1
 ; Diagnostic: also run the game's original searches and count any
 ; disagreement in fps_patch.log (slower). 1 = on, 0 = off.
 multicore_verify=0
+
+; Multi-core project M3a: the game's trail drawing read a value back out of
+; GPU memory for every trail point (very slow); compute it instead. Same
+; picture. 1 = on (default), 0 = off.
+multicore_trail_fix=1

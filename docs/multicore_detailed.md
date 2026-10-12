@@ -184,9 +184,11 @@ SAGE ancestor, so hot spots are likely similar but unconfirmed for CnC3):
 
 ## 4b. Roadmap (2026-10-12)
 
-The user chose this order: **M1** particle list insert (option C) → **M2**
-logic/drawing pipelining (option B) → **M3** trail vertex builder (C/D) →
-**M4** range queries (C). All four builds must be supported.
+The user first chose: **M1** particle list insert → **M2** logic/drawing
+pipelining → **M3** trail vertex builder → **M4** range queries. After the
+M2 research (§4d) the order became **M1** (done) → **M3** (particle/trail
+work on other cores, option D) → **M2-lite** (design A′) → **M4**. All four
+builds must be supported.
 
 ## 4c. M1: particle-list insertion index (implemented 2026-10-12)
 
@@ -239,6 +241,159 @@ addresses: 0x7573FC / 0x61EC10 / 0x77FF66):
 - Profile, minutes 4–6: the game's scan `0x7573FC` is gone. The verify walk,
   now inside our DLL, shows as DINPUT8 **7.3%** (0.4% before). That is the
   cost M1 removes with `multicore_verify=0`.
+
+## 4d. M2 research: how logic and drawing interact (2026-10-12, TW 1.10)
+
+Static analysis in Ghidra. The frame order and the Object→Drawable push were
+re-checked by hand.
+
+**Frame order:** main loop `0x55D9C3` → `0x7F0C10` → `GameEngine_update
+0x54B0CE`:
+1. AssetManager update, ScriptEngine pre-update `0x50EE29`, freeze check.
+2. Engine slot 0x98 (`0x564D42`):
+   - Apt UI;
+   - **GameClient_update `0x48EBF1`**: weather / tracers / clouds / Anim2D,
+     input, the Drawable loop, then W3DDisplay::draw `0x83BE2D` →
+     `0x83B400`. Inside the draw: begin-render `0x7479DE` (DX mutex
+     `0xBFDE54`), the FX particle manager update, scene render `0x839FB3` →
+     `0x832120`, end-render `0x74D5B4`. Then deferred Drawable frees
+     `0x47AB8F`;
+   - TheAudio update; TheNetwork update.
+3. **Logic phase dispatch** (slot 0x94).
+4. Message pump; limiter `Sleep(0)` loop.
+
+So a frame's logic runs after that frame's draw.
+
+**Phases** (`GameLogic_UpdatePhase 0x4EE108`):
+- 1: lockstep gate, script/Lua/terrain/victory, CRC, command processing,
+  then `Drawable_refreshInterpolationHistory 0x474EAF` for each Object;
+- 2: partition and collision managers;
+- 3–4: update-module bucket 0 (4/5 + 1/5);
+- 5: TheAI, buckets 1–2, shroud, skirmish AI, …;
+- 6: bucket 3;
+- slice end: flush `0x5E2C1B`.
+
+**Logic writes client state directly, with no locks:**
+- Every Object move (`0x5F67D4`, verified) writes Drawable +0x47C / +0x148
+  / +0x149 and calls `0x66FC70` → `Drawable::reactToTransformChange
+  0x4748D6` → draw modules.
+- Drawables are created (`0x674F88` → `0x804792`) and destroyed
+  (`0x48621A`, unlinked at once, freed after the draw) from logic.
+- The model-condition flush `0x5E2C1B` calls the draw modules.
+- Logic also calls these directly:
+  - particle-system creation `0x5BE5E6` (23 callers);
+  - audio `addAudioEvent` (`0x800611`, ~84 logic-side callers);
+  - Eva, InGameUI, terrain visuals.
+
+**Shared infrastructure:**
+- The allocator is already thread-safe (a recursive critical section at
+  allocator + 0x4E4, `0x9176F4` / `0x91771D`), but logic and drawing would
+  contend for it.
+- Reference counting is not atomic (an intrusive reference list).
+- There are three unlocked RNG states: logic `0xB84DD0`, client `0xB84DA0`,
+  audio `0xB84DB8`.
+- Partition-manager queries keep scratch state and are also made from W3D
+  code (`0x83BC1D`).
+- The particle list and the audio manager have no locks.
+
+**Partial snapshot:** Objects keep their previous transform and position;
+phase 1 copies previous/current into the Drawable (+0x64 / +0x94, +0xC4…),
+and drawing blends them. But the live transform is still pushed on every move.
+
+**Designs (overlap = main-thread time saved):**
+- **A, as first planned (logic overlaps only work that never touches logic
+  state):** ≤5% light, ≤2% heavy. Almost nothing qualifies.
+- **B (the whole logic tick concurrent with drawing):** ≈3× FPS in heavy
+  battles, but every client read of logic state (hundreds of functions)
+  would need a snapshot and every logic→client push a queue. Not feasible
+  through hooks.
+- **A′ (logic overlaps only the scene render):** start the frame's phases
+  on a worker after the particle update in `0x83B400` and join after
+  `0x74D5B4`. It requires:
+  - deferring the transform pushes;
+  - moving the flush to the join;
+  - one client lock around the render, taken by the worker in
+    create/destroy Drawable, particle insert, audio and FX;
+  - a per-thread client RNG.
+
+  Estimated gain: ~25–30% light, ~10–15% heavy (less with lock contention).
+  High risk.
+- **C (client-only parallel loops: CPU particle steps, trail vertices,
+  particle render):** ~15–20% heavy, low risk, independent of the logic.
+
+**Unknowns needing runtime tests:**
+- where Drawable +0x144 bit 0x80 is cleared (interpolation reading live
+  Objects);
+- the render's share in heavy battles;
+- calls per tick of the push / create / destroy / particle / audio entry
+  points;
+- whether the render dereferences Objects or the partition manager;
+- whether the D3D9 device is MULTITHREADED;
+- other unlocked pools;
+- which logic-side users of the client RNG are real logic;
+- object deletion and the GameLogic + 0x170 list;
+- audio thread-safety;
+- lockstep and replay CRC behaviour with a worker.
+
+## 4e. M3a: trail vertex read-back (implemented 2026-10-12)
+
+- The trail vertex builder (TW 1.10 `0x5BA171`; 1.9 `0x7592CB`) writes
+  two vertices per trail point into the locked vertex buffer. It copies
+  the first vertex's V into the second by **reading it back** from the
+  buffer: `FLD [ECX+4]; FSTP [EAX+ESI+4]` at `0x5BA403`.
+- GPU-visible memory is extremely slow to read. **100% of the builder's
+  samples** landed on the next instruction (`+0x295`) in both profiles: 7.0%
+  of the main thread in the light 1.10 game, 10.6% in the heavy 1.9 battle.
+  This needed no threading.
+- Fix (`src_multicore/render_fixes.c`, `multicore_trail_fix=1`): the 7 bytes
+  become `JMP trail_vertex_v_stub; NOP; NOP`. The stub recomputes V with the
+  builder's own instructions (`CVTSI2SS [EBP-4]; DIVSS [EBP-0x24]; MULSS
+  [EDX+0xC]`; same encodings, so bit-identical), stores it and jumps back.
+  XMM0 is dead there; the loop reloads it.
+- Signature: a 100-byte run around it is byte-identical in all four builds
+  (1.9 `0x75955D`, KW 1.03 `0x62142A`, KW 1.02 `0x78243D`).
+- A scan of both profiles for other "all samples on one instruction"
+  functions found only ordinary list walks (cache misses), no other
+  read-backs.
+
+## 4f. M1b: particle first-draw sibling search (implemented 2026-10-12)
+
+- `0x5BF76B` (1.9 `0x75E74F`, 3.4% heavy, effects zone): a particle
+  system's first draw walks the **whole** manager list for another system
+  with the same key whose render data (+0x84 → virtual +0x24, flag +0x10)
+  is set up, and shares it (`0x7F12E7`).
+- Systems with the same key are contiguous (the game's own insert rule, true
+  even without M1). So the candidates, in list order, are exactly that
+  group:
+  - the loop setup (9 bytes) becomes `PUSH EDI; CALL
+    particle_index_sibling_stub; JZ end; NOP`. The stub returns the group's
+    first node (from the M1 index, or one walk) and sets the flags;
+  - the "key differs" `JNZ` (rel8 0x27 → 0x3B) now leaves the loop.
+- `multicore_verify=1` also checks the start against a walk and counts
+  **split groups** (a key in more than one run, which would break the
+  assumption).
+- Stress test (`temp/particle_index_test`, extended): 0 mismatches.
+  Identical bytes in all four builds.
+
+## 4g. Test of M1 + M1b + M3a (2026-10-12, TW 1.9 modded, 7 AIs)
+
+- **Verify run** (`fps_patch1.log`): ~57,000 finds and ~45,000 sibling
+  searches; **0 verify mismatches, 0 split groups**.
+- **Speed run** (verify off, profiler on, `temp/profile4/`):
+  - The three hot spots have dropped out of the profile: `0x7592CB` 10.6% →
+    <0.1%, `0x7573FC` 8.4% → <0.1%, `0x75E74F` 3.4% → <0.4%. Effects zone
+    top function is 0.4%.
+  - At the same point of the match (~308 s): before, 6 FPS, game ticks 67%,
+    drawing 53 ms/frame. Now 5 FPS, game ticks **101%**, drawing **21
+    ms/frame**. Game speed stayed at 97–102% to the end (logic ~800 ms/s).
+  - Logic is now 78% of the main thread in the last window. Its top items
+    are the range queries `0x98E129` / `0x98E360` / `0x98E1CE` (~12.7% in
+    total), which is M4.
+- The user noticed the rate "sticks at 15 FPS". Not a bug: between 15 and
+  90 FPS only multiples of 15 are supported (the stock schedule needs whole
+  client frames per logic tick), so the next step up from 15 is 30. With
+  logic at 660–760 ms/s plus ~11 ms per frame of drawing, 30 FPS needs
+  ~1.05 s per second and doesn't fit, but 20–24 FPS would.
 
 ## 5. Options in detail
 

@@ -48,15 +48,24 @@ First profile, busiest minutes:
   only use 2 GB of memory. TW 1.10 and Kane's Wrath are. That causes memory
   crashes, not lag.
 
-## Roadmap (agreed with the user 2026-10-12)
+## Roadmap (agreed with the user 2026-10-12, reordered the same day)
+
+The M2 research showed that running *all* game logic beside the drawing
+isn't feasible. The logic writes straight into the drawing data (every unit
+move, new effect, sound and UI message) in hundreds of places, with no
+locks. Only a lighter version (logic beside the 3D scene render) is
+realistic, and it's high risk. The user chose: M3 first, then M2-lite,
+then M4.
 
 Every step must work on TW 1.10, TW 1.9, KW 1.03 and KW 1.02.
 
 | Step | What | Expected gain (heavy battle) | Status |
 |---|---|---|---|
 | M1 | Particle-effect list: find the insertion point instantly instead of searching the whole list | ~7% of the main thread | **done**: 0 mismatches in ~435,000 checks in a heavy TW 1.9 battle |
-| M2 | Game logic on its own CPU core (logic and drawing run at the same time) | drawing ~3× FPS; game speed ~56% → ~80% in the worst minutes | **next**: research |
-| M3 | Cheaper trail drawing, or trail vertex building on another core | ~10% (7% in normal games) | planned |
+| M3a | Trail drawing: stop reading a value back from GPU memory for every trail point (found by the profiler: it *was* the whole trail cost) | ~7% light games, ~11% heavy | **done** (gone from the profile) |
+| M1b | A particle effect's first draw: look only at effects of its own kind instead of the whole list | ~3% heavy | **done**: 0 mismatches, 0 split groups |
+| M3 | Remaining particle work on other cores (CPU particle steps, particle drawing) | to be measured after M3a | next |
+| M2 | Game logic beside the 3D scene render ("M2-lite") | ~10–15% (~25–30% in light games), high risk | after M3 |
 | M4 | Faster "find objects near me" range searches (results must stay identical) | ~10% of logic | planned |
 
 ## Options, best first

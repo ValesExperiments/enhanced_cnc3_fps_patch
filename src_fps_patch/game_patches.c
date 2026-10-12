@@ -3,6 +3,7 @@
 #include "log.h"
 #include "memory_patch.h"
 #include "particle_index.h"
+#include "render_fixes.h"
 #include "profiler.h"
 
 #include <math.h>
@@ -2807,6 +2808,36 @@ static void install_particle_index(PatchInstaller *installer) {
         patch_branch(installer, erase_names[i], &list->erase_calls[i], 0xE8, call_patch,
                      sizeof(call_patch));
     }
+
+    /* M1b: the first-draw sibling search starts at the key's group and stops after it. */
+    if (g_config->multicore_particle_index) {
+        static const u8 setup_original[9] = { 0x8B, 0x03, 0x57, 0x8B, 0x38, 0x3B, 0xF8, 0x74, 0x54 };
+        static const u8 mismatch_original[1] = { 0x27 };
+        static const u8 mismatch_patch[1] = { 0x3B };
+        u8 setup_patch[9] = { 0x57, 0xE8, 0, 0, 0, 0, 0x74, 0x55, 0x90 };
+
+        encode_rel32(&setup_patch[2], game_address(g_game, list->sibling_setup + 6u),
+                     particle_index_sibling_stub);
+        patch_bytes(installer, "particle sibling search setup", list->sibling_setup,
+                    setup_original, setup_patch, sizeof(setup_patch));
+        patch_bytes(installer, "particle sibling search exit", list->sibling_mismatch,
+                    mismatch_original, mismatch_patch, sizeof(mismatch_patch));
+    }
+}
+
+/*
+ * src_multicore M3a: the trail vertex builder's read-back of V from the
+ * vertex buffer becomes a jump to a stub that recomputes V (render_fixes.c).
+ */
+static void install_trail_vertex_fix(PatchInstaller *installer) {
+    static const u8 readback[7] = { 0xD9, 0x41, 0x04, 0xD9, 0x5C, 0x30, 0x04 };
+    u32 rva = g_game->trail_vertices.readback;
+    u8 jump[7] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90 };
+
+    if (!g_config->multicore_trail_fix) return;
+    trail_vertex_set_resume(game_address(g_game, rva + sizeof(readback)));
+    encode_rel32(&jump[1], game_address(g_game, rva + 5u), trail_vertex_v_stub);
+    patch_bytes(installer, "trail vertex read-back", rva, readback, jump, sizeof(jump));
 }
 
 static void install_minimap_glide(PatchInstaller *installer) {
@@ -3146,9 +3177,10 @@ static void monitor_frame_pacing(u32 interval_ms) {
         if (++status_count % 6u == 0u) {
             ParticleIndexStats stats = particle_index_take_stats();
             log_printf("Particle index [%us]: finds %u, hits %u, misses %u, rebuilds %u, "
-                       "verify mismatches %u, keys %u",
+                       "sibling searches %u, verify mismatches %u, split groups %u, keys %u",
                        seconds, stats.finds, stats.hits, stats.misses, stats.rebuilds,
-                       stats.verify_mismatches, stats.entries);
+                       stats.sibling_searches, stats.verify_mismatches, stats.split_groups,
+                       stats.entries);
         }
         log_printf("Adaptive pacing [%us]: %u FPS, frames %.0f%%, game ticks %.0f%%, "
                    "logic %.0f ms/s, effects %.0f ms/s, drawing %.2f ms/frame, load %.0f%%",
@@ -3672,6 +3704,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_waypoint_lines(&installer);
     install_effect_timing(&installer);
     install_particle_index(&installer);
+    install_trail_vertex_fix(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);
