@@ -20,6 +20,10 @@ typedef struct Config {
     /* Diagnostic: sample the main thread into fps_profile.log (src_multicore). */
     BOOL profiler;
     u32 profiler_report_seconds;
+    /* src_multicore M1: instant particle-list insertion point. */
+    BOOL multicore_particle_index;
+    /* Diagnostic: also run the original searches and count disagreements. */
+    BOOL multicore_verify;
 } Config;
 
 void config_set_defaults(Config *config);

@@ -1872,6 +1872,69 @@ static BOOL resolve_effect_timing_sites(
     return fx->game_logic_pointer == game->particle_draw.game_logic_pointer;
 }
 
+/*
+ * Particle manager "add system": find the first system with the same key in
+ * the list (+0x24) and insert before it. Key offset at +28, list offset at
+ * +34; the scan is +26..+76; the list insert CALL is at +86.
+ */
+static const u16 g_particle_insert_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x51, 0x53, 0x8B, 0x5D, 0x08, 0x8B, 0x03, 0x85, 0xC0, 0x56, 0x57,
+    0x8B, 0xF9, 0x89, 0x7D, 0xFC, 0x75, 0x05, 0xB8, 0xEF, 0xBE, 0xAD, 0xBA,
+    0x8B, 0xB0, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0x8D, 0x4F, PATTERN_ANY,
+    0x8B, 0x01, 0x8B, 0x10, 0x3B, 0xD0, 0x74, 0x21, 0x8B, 0x7A, 0x08, 0x85, 0xFF,
+    0x75, 0x05, 0xBF, 0xEF, 0xBE, 0xAD, 0xBA, 0x3B, 0xB7, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00,
+    0x74, 0x08, 0x8B, 0x12, 0x3B, 0xD0, 0x75, 0xE6, 0xEB, 0x02, 0x8B, 0xC2, 0x8B, 0x7D, 0xFC,
+    0x53, 0x51, 0x8B, 0xD4, 0x89, 0x02, 0x8D, 0x45, 0x08, 0x50, 0xE8
+};
+/* Particle manager erase(iterator*): unlink the node, count (+0x3C) - 1. */
+static const u16 g_particle_erase_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x53, 0x8B, 0x5D, 0x08, 0x56, 0x8B, 0x33, 0x83, 0xC6, 0x08, 0x8B, 0x06,
+    0x85, 0xC0, 0x57, 0x8B, 0xF9, 0x75, 0x05, 0xB8, 0xEF, 0xBE, 0xAD, 0xBA,
+    0x80, 0xB8, PATTERN_ANY, PATTERN_ANY, 0x00, 0x00, 0x00, 0x74, 0x06,
+    /* TW: PUSH ESI; CALL rel32. KW: MOV EAX,[EDI]; PUSH ESI; CALL [EAX+0x44]. */
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x36, 0x85, 0xF6,
+    0xB8, 0xEF, 0xBE, 0xAD, 0xBA, 0x74, 0x02, 0x8B, 0xC6, 0x51, 0xC6, 0x80, PATTERN_ANY,
+    PATTERN_ANY, 0x00, 0x00, 0x00, 0x8B, 0x0B, 0x8B, 0xC4, 0x89, 0x08, 0x8D, 0x45, 0x08, 0x50,
+    0x8D, 0x4F, PATTERN_ANY, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x00, 0x89, 0x03, 0xFF, 0x4F, PATTERN_ANY, 0x5F, 0x5E, 0x5B, 0x5D, 0xC2, 0x04, 0x00
+};
+
+static BOOL resolve_particle_list_sites(
+    u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    ParticleListLayout *list = &game->particle_list;
+    u32 image_size = game->pe_size_of_image;
+    u32 count;
+    u32 i;
+
+    if (!FIND_UNIQUE(module, nt, g_particle_insert_pattern, &list->insert_function) ||
+        !FIND_UNIQUE(module, nt, g_particle_erase_pattern, &list->erase_function)) {
+        return FALSE;
+    }
+    list->key_offset = load_u32(module + list->insert_function + 28u);
+    list->list_offset = module[list->insert_function + 34u];
+    list->scan_start = list->insert_function + 26u;
+    list->scan_length = 50u;
+    list->resume = list->scan_start + list->scan_length;
+    list->insert_call.instruction = list->insert_function + 86u;
+    if (!decode_relative_target(module, image_size, list->insert_call.instruction, 0xE8,
+                                &list->insert_call.target) ||
+        /* The scan's second key compare and the erase's list must agree. */
+        load_u32(module + list->insert_function + 57u) != list->key_offset ||
+        module[list->erase_function + 75u] != list->list_offset ||
+        /* The replacement stub assumes these (all four builds use them). */
+        list->list_offset != 0x24u || list->key_offset != 0x15Cu ||
+        !find_branches_to(module, nt, image_size, list->erase_function, list->erase_calls,
+                          PARTICLE_ERASE_CALLS, &count) ||
+        count != PARTICLE_ERASE_CALLS) {
+        return FALSE;
+    }
+    for (i = 0; i < PARTICLE_ERASE_CALLS; ++i) {
+        if (module[list->erase_calls[i].instruction] != 0xE8) return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL resolve_objective_ui_sites(
     u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
     ObjectiveUiLayout *ui = &game->objective_ui;
@@ -2090,6 +2153,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_minimap_sites(module, nt, &game) ||
         !resolve_waypoint_line_sites(module, nt, &game) ||
         !resolve_effect_timing_sites(module, nt, &game) ||
+        !resolve_particle_list_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

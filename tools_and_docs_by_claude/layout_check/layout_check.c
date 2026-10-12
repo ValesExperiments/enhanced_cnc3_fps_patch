@@ -147,6 +147,7 @@ static int check(const char *path) {
         { "minimap", resolve_minimap_sites },
         { "waypoint_lines", resolve_waypoint_line_sites },
         { "effect_timing", resolve_effect_timing_sites },
+        { "particle_list", resolve_particle_list_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -229,6 +230,15 @@ static int check(const char *path) {
                full.effect_timing.pulse_color_calls[0].instruction,
                full.effect_timing.pulse_color_calls[1].instruction,
                full.effect_timing.game_logic_pointer, full.effect_timing.logic_frame_offset);
+        printf("  particle list: insert 0x%X scan 0x%X+%u insert call 0x%X->0x%X, erase 0x%X "
+               "calls 0x%X 0x%X 0x%X, list +0x%X key +0x%X\n",
+               full.particle_list.insert_function, full.particle_list.scan_start,
+               full.particle_list.scan_length, full.particle_list.insert_call.instruction,
+               full.particle_list.insert_call.target, full.particle_list.erase_function,
+               full.particle_list.erase_calls[0].instruction,
+               full.particle_list.erase_calls[1].instruction,
+               full.particle_list.erase_calls[2].instruction,
+               full.particle_list.list_offset, full.particle_list.key_offset);
         printf("  minimap look-at copies %u, view 0x%X\n",
                full.minimap.count, full.minimap.view_pointer);
         printf("  shroud fog row copy call 0x%X -> 0x%X\n",

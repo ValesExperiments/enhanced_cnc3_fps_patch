@@ -306,6 +306,31 @@ typedef struct EffectTimingLayout {
     u32 logic_frame_offset;
 } EffectTimingLayout;
 
+enum { PARTICLE_ERASE_CALLS = 3 };
+
+typedef struct ParticleListLayout {
+    /*
+     * src_multicore M1. The particle-system manager keeps its systems in a
+     * std::list (node: next, prev, system) at manager + list_offset. Adding
+     * a system (TW 1.10 VA 0x5B7D9D, thiscall(manager, RefPtr*)) scans the
+     * list for the first system with the same key (system + key_offset) and
+     * inserts before it (or at the end). The scan is the 50 bytes at
+     * insert_function + 26 (in: EAX = system, EDI = manager; out: EAX =
+     * position node, ECX = &list). The list's only insert is the CALL at
+     * insert_call; its only erase is the manager's erase(iterator*) (TW
+     * 0x5B7E14), called from three places.
+     */
+    u32 insert_function;
+    u32 scan_start;
+    u32 scan_length;
+    u32 resume;
+    BranchSite insert_call;
+    u32 erase_function;
+    BranchSite erase_calls[PARTICLE_ERASE_CALLS];
+    u32 list_offset;
+    u32 key_offset;
+} ParticleListLayout;
+
 typedef struct SelectionPanelLayout {
     /*
      * TacticalSelectionDetailsPanelImpl::SetUnitName (forwards only changed
@@ -376,6 +401,7 @@ typedef struct GameLayout {
     MinimapLayout minimap;
     WaypointLineLayout waypoint_lines;
     EffectTimingLayout effect_timing;
+    ParticleListLayout particle_list;
 } GameLayout;
 
 typedef enum GameResolveResult {

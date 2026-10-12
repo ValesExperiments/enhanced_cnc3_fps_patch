@@ -182,6 +182,64 @@ SAGE ancestor, so hot spots are likely similar but unconfirmed for CnC3):
 - `timeBeginPeriod` is per-process since Windows 10 2004; occluded windows
   may lose it on Windows 11.
 
+## 4b. Roadmap (2026-10-12)
+
+The user chose this order: **M1** particle list insert (option C) → **M2**
+logic/drawing pipelining (option B) → **M3** trail vertex builder (C/D) →
+**M4** range queries (C). All four builds must be supported.
+
+## 4c. M1: particle-list insertion index (implemented 2026-10-12)
+
+**Game code** (TW 1.10 VAs; TW 1.9 / KW 1.03 / KW 1.02 are identical apart from
+addresses: 0x7573FC / 0x61EC10 / 0x77FF66):
+- The particle-system manager keeps `std::list<RefPtr<ParticleSystem>>`
+  at manager + 0x24 (node: next, prev, system).
+- "Add system" `0x5B7D9D` (thiscall(manager, RefPtr*), one caller: system
+  creation `0x5BE5E6`, 12+ callers in FX/logic code) walks the list for the
+  first system with the same key (system + 0x15C), inserts before it with the
+  list helper `0x5B735B` (only caller), then sets system + 0x177 and
+  manager + 0x3C += 1.
+- The only erase is `0x5B7E14` (manager, iterator*), via list helper
+  `0x5B7380` (only caller). It is called by the per-frame update (dead
+  systems), the clear-all `0x5B922C`, and remove-one `0x5B9413`.
+- Because every insert goes in front of the first same-key system, systems
+  with the same key are always contiguous.
+
+**Patch** (`src_multicore/particle_index.c`, installed by
+`install_particle_index` in game_patches.c):
+- The first 7 bytes of the 50-byte scan become `CALL particle_index_scan_stub;
+  JMP +43`. The naked stub (in: EAX = system, EDI = manager; out: EAX =
+  position node, ECX = manager + 0x24; keeps EDX) calls `particle_index_find`.
+- Index: open-addressing hash, key → {first node of the group, node count}.
+  - It is built by one full walk when first used, for a new manager, after
+    a reset (each session), or after any inconsistency.
+  - The insert-call wrapper records each new node as the group's first.
+  - The three erase-call wrappers hand "first" to the next node (if it has
+    the same key) or drop the key when its count reaches 0.
+  - Every hit is validated (node still linked, same key). An unknown first
+    node is found with one walk.
+- `multicore_particle_index=1` (default) / `=0` runs the original walk.
+  `multicore_verify=1` also walks and counts disagreements. The
+  "Particle index [Ns]" line in fps_patch.log (every 60 s) shows finds, hits,
+  misses (key not present: insert at the end), rebuilds and verify
+  mismatches.
+- **Offline stress test** (`temp/particle_index_test`): about 500,000 finds
+  with random inserts and erases (300 keys, ≤2000 live nodes, a mid-run reset
+  and a full clear). Results: 0 mismatches against the original walk and
+  2 rebuilds.
+- Resolver `resolve_particle_list_sites`: both functions by signature (KW's
+  erase has a virtual call where TW has a direct one, so those 6 bytes are
+  wildcarded). It requires list offset 0x24 and key offset 0x15C (assumed by
+  the stub), and exactly 3 erase calls. Verified on all four builds.
+
+**In-game test (2026-10-12, TW 1.9 modded, 7 AIs, verify + profiler on):**
+- "Particle index" lines: 435,621 finds; 96% hits; 4% misses (new keys,
+  appended); 2 rebuilds (session start); **0 verify mismatches**. Up to 259
+  keys were live at once.
+- Profile, minutes 4–6: the game's scan `0x7573FC` is gone. The verify walk,
+  now inside our DLL, shows as DINPUT8 **7.3%** (0.4% before). That is the
+  cost M1 removes with `multicore_verify=0`.
+
 ## 5. Options in detail
 
 ### A. Profiler (prerequisite) — built 2026-10-12

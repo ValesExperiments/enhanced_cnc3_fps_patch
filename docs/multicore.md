@@ -48,6 +48,17 @@ First profile, busiest minutes:
   only use 2 GB of memory. TW 1.10 and Kane's Wrath are. That causes memory
   crashes, not lag.
 
+## Roadmap (agreed with the user 2026-10-12)
+
+Every step must work on TW 1.10, TW 1.9, KW 1.03 and KW 1.02.
+
+| Step | What | Expected gain (heavy battle) | Status |
+|---|---|---|---|
+| M1 | Particle-effect list: find the insertion point instantly instead of searching the whole list | ~7% of the main thread | **done**: 0 mismatches in ~435,000 checks in a heavy TW 1.9 battle |
+| M2 | Game logic on its own CPU core (logic and drawing run at the same time) | drawing ~3× FPS; game speed ~56% → ~80% in the worst minutes | **next**: research |
+| M3 | Cheaper trail drawing, or trail vertex building on another core | ~10% (7% in normal games) | planned |
+| M4 | Faster "find objects near me" range searches (results must stay identical) | ~10% of logic | planned |
+
 ## Options, best first
 
 1. **Measure first.** Build a profiler that shows where the main thread's

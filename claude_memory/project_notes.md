@@ -29,6 +29,12 @@ Fix or remove anything that turns out to be wrong.
   `docs/multicore_detailed.md`. The user's recent test logs come from
   **TW 1.9**. The user made it Large Address Aware with the 4 GB patcher on
   2026-10-12 (only the LAA flag and the checksum changed; the patch still resolves).
+- **Multi-core roadmap (agreed 2026-10-12):** M1 particle-list index →
+  M2 logic on its own core → M3 trail vertex builder → M4 range queries. The
+  status is in `docs/multicore.md`. Test any list/index replacement offline
+  first, against the original algorithm with random operations (see
+  `temp/particle_index_test`), and give the user a `multicore_verify=1` mode
+  for in-game proof.
 - **Profiler (2026-10-12):** `profiler=1` makes the DLL write
   `fps_profile.log` (src_multicore/profiler.c). Turn RVAs into names with
   `tools_and_docs_by_claude/profiler_report/analyze.py --map

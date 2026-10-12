@@ -2,6 +2,7 @@
 
 #include "log.h"
 #include "memory_patch.h"
+#include "particle_index.h"
 #include "profiler.h"
 
 #include <math.h>
@@ -2758,6 +2759,56 @@ static void install_effect_timing(PatchInstaller *installer) {
     }
 }
 
+/*
+ * src_multicore M1: the particle manager's "add system" scan is replaced by
+ * an index (particle_index.c). The scan's first 7 bytes become CALL stub;
+ * JMP past the scan. The list's insert CALL and the manager's three erase
+ * CALLs go through wrappers that keep the index exact.
+ */
+static void install_particle_index(PatchInstaller *installer) {
+    static const char *const erase_names[PARTICLE_ERASE_CALLS] = {
+        "particle erase call 1", "particle erase call 2", "particle erase call 3"
+    };
+    const ParticleListLayout *list = &g_game->particle_list;
+    ParticleIndexSetup setup;
+    u8 call_patch[5] = { 0xE8, 0, 0, 0, 0 };
+    u8 scan_patch[7] = { 0xE8, 0, 0, 0, 0, 0xEB, 0 };
+    u8 expected[7];
+    u32 i;
+
+    setup.list_offset = list->list_offset;
+    setup.key_offset = list->key_offset;
+    setup.insert = (ParticleListInsertFn)game_address(g_game, list->insert_call.target);
+    setup.erase = (ParticleListEraseFn)game_address(g_game, list->erase_function);
+    setup.enabled = g_config->multicore_particle_index;
+    setup.verify = g_config->multicore_verify;
+    particle_index_setup(&setup);
+
+    memcpy(expected, game_address(g_game, list->scan_start), sizeof(expected));
+    /* MOV ESI,[EAX+key]; LEA ECX,[EDI+list]: the resolver matched these. */
+    if (expected[0] != 0x8B || expected[1] != 0xB0) {
+        installer->ok = FALSE;
+        return;
+    }
+    encode_rel32(&scan_patch[1], game_address(g_game, list->scan_start + 5u),
+                 particle_index_scan_stub);
+    scan_patch[6] = (u8)(list->scan_length - sizeof(scan_patch));
+    patch_bytes(installer, "particle list scan", list->scan_start, expected, scan_patch,
+                sizeof(scan_patch));
+
+    encode_rel32(&call_patch[1], game_address(g_game, list->insert_call.instruction + 5u),
+                 particle_index_insert);
+    patch_branch(installer, "particle list insert call", &list->insert_call, 0xE8, call_patch,
+                 sizeof(call_patch));
+    for (i = 0; i < PARTICLE_ERASE_CALLS; ++i) {
+        encode_rel32(&call_patch[1],
+                     game_address(g_game, list->erase_calls[i].instruction + 5u),
+                     particle_index_erase);
+        patch_branch(installer, erase_names[i], &list->erase_calls[i], 0xE8, call_patch,
+                     sizeof(call_patch));
+    }
+}
+
 static void install_minimap_glide(PatchInstaller *installer) {
     static const char *const names[MINIMAP_LOOK_AT_MAX][MINIMAP_LOOK_AT_CALLS] = {
         { "minimap look-at call 1", "minimap look-at call 2" },
@@ -3090,7 +3141,15 @@ static void monitor_frame_pacing(u32 interval_ms) {
     tick_speed = ticks / LOGIC_FPS * 1000.0 / sum_period;
 
     if ((i32)(now - g_pacing_next_status_ms) >= 0) {
+        static u32 status_count;
         g_pacing_next_status_ms = now + PACING_STATUS_MS;
+        if (++status_count % 6u == 0u) {
+            ParticleIndexStats stats = particle_index_take_stats();
+            log_printf("Particle index [%us]: finds %u, hits %u, misses %u, rebuilds %u, "
+                       "verify mismatches %u, keys %u",
+                       seconds, stats.finds, stats.hits, stats.misses, stats.rebuilds,
+                       stats.verify_mismatches, stats.entries);
+        }
         log_printf("Adaptive pacing [%us]: %u FPS, frames %.0f%%, game ticks %.0f%%, "
                    "logic %.0f ms/s, effects %.0f ms/s, drawing %.2f ms/frame, load %.0f%%",
                    seconds, g_rate, speed * 100.0, tick_speed * 100.0, logic_per_second,
@@ -3612,6 +3671,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     install_minimap_glide(&installer);
     install_waypoint_lines(&installer);
     install_effect_timing(&installer);
+    install_particle_index(&installer);
     install_drawable_interpolation_window(&installer);
     install_particle_and_cursor_timing(&installer);
     install_phase_scheduler(&installer);
@@ -3703,6 +3763,7 @@ void game_patches_reset_state(void) {
         g_trail_draws_logged = 0;
         memset(g_trail_history, 0, sizeof(g_trail_history));
         g_pulse_frame_known = FALSE;
+        particle_index_reset();
         reset_keyboard_clock();
         /* First direct reader gets floor(990/FPS); the hook distributes remainder. */
         *(u32 *)game_address(g_game, g_game->timing.w3d_milliseconds_per_frame) =

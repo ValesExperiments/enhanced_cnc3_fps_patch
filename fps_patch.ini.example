@@ -35,3 +35,12 @@ debug_trail_draws=0
 ; profiler_report_seconds. Costs about 3% of one CPU core. 1 = on, 0 = off.
 profiler=0
 profiler_report_seconds=60
+
+; Multi-core project M1: find where a new particle effect goes in the
+; particle manager's list instantly instead of searching the whole list
+; (big battles). Same result as the game. 1 = on (default), 0 = off.
+multicore_particle_index=1
+
+; Diagnostic: also run the game's original searches and count any
+; disagreement in fps_patch.log (slower). 1 = on, 0 = off.
+multicore_verify=0

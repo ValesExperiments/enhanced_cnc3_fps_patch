@@ -17,3 +17,7 @@ Status: research phase. Findings are in `docs/multicore.md` (summary) and
   Makefile) and stays off unless `profiler=1` is set in `fps_patch.ini`.
   Output: `fps_profile.log`; analyse it with
   `tools_and_docs_by_claude/profiler_report/analyze.py`.
+- `particle_index.c` / `particle_index.h`: M1, an instant insertion point for
+  the particle manager's list (replaces a full-list search when a particle
+  effect is created). `multicore_particle_index=1` (default);
+  `multicore_verify=1` checks it against the original search.
