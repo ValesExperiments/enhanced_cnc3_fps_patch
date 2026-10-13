@@ -2112,6 +2112,42 @@ static BOOL resolve_button_enable_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, Game
     return TRUE;
 }
 
+/*
+ * Stream update: PUSH ESI; MOV ESI,ECX; CALL expire; previous = frame;
+ * MOV ECX,[GameClient]; frame read; delta; CVTSI2SS; DIVSS [client FPS].
+ */
+static const u16 g_stream_update_pattern[] = {
+    0x56, 0x8B, 0xF1, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B, 0x46, 0x50, 0x89, 0x46, 0x4C, 0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    PATTERN_ANY, 0x8B, 0x01, 0xFF, 0x50, 0x78, 0x89, 0x46, 0x50, 0x2B, 0x46, 0x4C, 0x74,
+    PATTERN_ANY, 0x51, 0xF3, 0x0F, 0x2A, 0xC0, 0xF3, 0x0F, 0x5E, 0x05, PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY
+};
+/* Stream constructor: both frame fields start at the current frame. */
+static const u16 g_stream_ctor_pattern[] = {
+    0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B, 0x01, 0xFF, 0x50,
+    0x78, 0x8B, 0xCE, 0x89, 0x46, 0x4C, 0x89, 0x46, 0x50, 0xE8
+};
+
+static BOOL resolve_stream_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    u32 game_client = (u32)(uintptr_t)(module + game->drawable_physics.game_client_pointer);
+    u32 update;
+    u32 ctor;
+
+    if (!FIND_UNIQUE(module, nt, g_stream_update_pattern, &update) ||
+        !FIND_UNIQUE(module, nt, g_stream_ctor_pattern, &ctor) ||
+        load_u32(module + update + 16u) != game_client ||
+        load_u32(module + ctor + 2u) != game_client ||
+        load_u32(module + update + 42u) !=
+            (u32)(uintptr_t)(module + game->timing.client_fps_float)) {
+        return FALSE;
+    }
+    game->stream.update_frame_call = update + 20u;
+    game->stream.ctor_frame_call = ctor + 6u;
+    game->stream.fps_divisor_operand = update + 42u;
+    return TRUE;
+}
+
 /* The recoil state switch (identical in all four builds). */
 static const u16 g_recoil_step_pattern[] = {
     0x8B, 0x46, 0x14, 0x3B, 0xC1, 0x7E, 0x7D, 0x83, 0xF8, 0x02, 0x7E, 0x29, 0x83, 0xF8, 0x03,
@@ -2524,6 +2560,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_turret_fraction_sites(module, nt, &game) ||
         !resolve_recoil_sites(module, nt, &game) ||
         !resolve_button_enable_sites(module, nt, &game) ||
+        !resolve_stream_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

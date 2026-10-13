@@ -359,6 +359,33 @@ Fix or remove anything that turns out to be wrong.
   `fps_patch.log` in the game folder. Copy it to `temp/` and run
   `tools_and_docs_by_claude/crash_dump.py <dmp> [stack dwords] [hex addrs]`
   (exception, registers, module bases, return addresses; stacks only, no heap).
+  **Freezes (game open, sound playing):** while it's still hung, run
+  `tools_and_docs_by_claude/hang_sample.py <pid> 1 1024` (suspends each thread
+  briefly, prints EIP, CPU time and stack return addresses). No busy thread
+  = a wait: read the CRITICAL_SECTION argument above the EnterCriticalSection
+  return address (OwningThread at +0xC). A lock owned with no matching frame
+  on the owner's stack was leaked by a swallowed exception: scan the owner's
+  stack (also above ESP) for an EXCEPTION_RECORD (0xC0000005 …) and its
+  CONTEXT. Then dump the faulting memory and check VirtualQueryEx region
+  types (0x404 = write-combined GPU mapping). Found B26 this way.
+- **Session logs:** `log_history=1` (ini) writes each session's log to
+  `logs_fpsps_patch_<date>_<time>.log` next to the DLL (2026-10-13). Ask the
+  user to turn it on when chasing intermittent bugs.
+- **Frame-number readers (2026-10-13):** a list of all 95 GameClient
+  frame readers (TW 1.10) is in `temp/frame_readers_110.txt`; the ones that run
+  faster above 30 FPS but weren't changed are listed in goals_detailed B26.
+- **Per-client-frame appenders with fixed buffers (B26, 2026-10-13):** code
+  that adds an element per new GameClient frame (vtable +0x78) into a buffer
+  sized once for 30 FPS overflows at high rates. Fix by redirecting its frame
+  reads to the synthetic 30 Hz frame (`redirect_frame_read`) and any
+  frames→seconds divisor to 30.
+  To name a `dinput8.dll+RVA` frame: `tools_and_docs_by_claude/pdb_syms.py
+  zig-out/bin/dinput8.dll zig-out/lib/dinput8-release.pdb <hex rva>...`.
+  Without Ghidra, disassemble TW 1.9 code with capstone inside a
+  `sigscan.py` script (`image("TW 1.9")`). **Remember the on-disk bytes are
+  unpatched:** check `game_patches.c` for a redirect before blaming a game
+  instruction (B25: the GPU particle expiry operand looked rate-dependent
+  but is already pointed at a constant 30).
   For a fault inside our `dinput8.dll`, first compare its .text with the
   current build (pefile). If they're identical, scan
   `zig-out/lib/dinput8-release.pdb` for S_GPROC32/S_LPROC32 records to name the

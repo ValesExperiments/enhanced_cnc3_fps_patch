@@ -96,6 +96,21 @@ typedef struct TurretFractionLayout {
     u32 pitch_site;
 } TurretFractionLayout;
 
+typedef struct StreamLayout {
+    /*
+     * B26: W3DStreamDraw's stream (liquid sprays: Scrin Corrupter, Firestorm
+     * Tiberium Trooper). Its update (TW 1.9 VA 0x4E0002) reads the client
+     * frame, advances the stream by (frames / client-FPS float) seconds and
+     * appends one point per new frame; the vertex buffer is sized once at
+     * creation. RVAs of the update's and the constructor's 5-byte
+     * "MOV EAX,[ECX]; CALL [EAX+78h]" frame reads, and of the update's
+     * DIVSS operand (the client-FPS float).
+     */
+    u32 update_frame_call;
+    u32 ctor_frame_call;
+    u32 fps_divisor_operand;
+} StreamLayout;
+
 typedef struct ButtonEnableLayout {
     /*
      * B20: gadgets push SetEnabled to their Flash clip through a direct call
@@ -528,6 +543,7 @@ typedef struct GameLayout {
     TurretFractionLayout turret_fraction;
     RecoilLayout recoil;
     ButtonEnableLayout button_enable;
+    StreamLayout stream;
 } GameLayout;
 
 typedef enum GameResolveResult {

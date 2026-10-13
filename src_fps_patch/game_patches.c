@@ -3303,6 +3303,33 @@ static void install_camera_timing(PatchInstaller *installer) {
                   &g_camera_shake_decay);
 }
 
+/*
+ * B26: a W3DStreamDraw stream (liquid sprays) appends one point per new
+ * client frame and ages its points by frames / client FPS, so at 155 FPS a
+ * spray held ~5x the retail number of points. Its vertex buffer is sized once
+ * at creation, so long sprays wrote past it: stretched polygons when the
+ * overrun hit other geometry, heap corruption (a crash, or a freeze from a
+ * leaked allocator lock) when it hit the heap after a mapped buffer. Both
+ * frame reads now see the synthetic 30 Hz frame and the time step divides by
+ * 30, so a stream grows, ages and is rebuilt exactly as at 30 FPS.
+ */
+static const float g_stream_retail_fps = 30.0f;
+
+static void install_stream_rate(PatchInstaller *installer) {
+    const StreamLayout *stream = &g_game->stream;
+    static const u8 divss[4] = { 0xF3, 0x0F, 0x5E, 0x05 };
+
+    redirect_frame_read(installer, "stream update frame read", stream->update_frame_call,
+                        NO_INTERLEAVED_PUSH);
+    redirect_frame_read(installer, "stream constructor frame read", stream->ctor_frame_call,
+                        NO_INTERLEAVED_PUSH);
+    expect_bytes(installer, "stream time-step instruction",
+                 stream->fps_divisor_operand - sizeof(divss), divss, sizeof(divss));
+    patch_pointer(installer, "stream time-step FPS operand", stream->fps_divisor_operand,
+                  game_address(g_game, g_game->timing.client_fps_float),
+                  &g_stream_retail_fps);
+}
+
 static void install_frame_authored_effects(PatchInstaller *installer) {
     const VisualLayout *visual = &g_game->visual;
 
@@ -4659,6 +4686,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     INSTALL_FEATURE(turret_pitch);
     INSTALL_FEATURE(recoil_rate);
     INSTALL_FEATURE(button_enable_tick);
+    INSTALL_FEATURE(stream_rate);
     INSTALL_FEATURE(drawable_interpolation_window);
     INSTALL_FEATURE(particle_and_cursor_timing);
     INSTALL_FEATURE(phase_scheduler);

@@ -28,6 +28,57 @@ typedef int (*StartSessionTailFn)(void);
 static Runtime g_runtime;
 static INIT_ONCE g_file_init_once = INIT_ONCE_STATIC_INIT;
 
+/* Appends value as `digits` decimal digits (zero-padded). */
+static void append_digits(wchar_t *text, size_t *length, u32 value, u32 digits) {
+    u32 i;
+    for (i = digits; i != 0; --i) {
+        text[*length + i - 1u] = (wchar_t)(L'0' + value % 10u);
+        value /= 10u;
+    }
+    *length += digits;
+}
+
+/*
+ * log_history=1: each session writes logs_fps\fps_patch_YYYY-MM-DD_HH-MM-SS.log
+ * next to the DLL instead of overwriting fps_patch.log. If the folder can't be
+ * created the path is left unchanged.
+ */
+static void use_session_log_path(Runtime *runtime) {
+    wchar_t folder[MAX_PATH];
+    wchar_t name[64] = L"logs_fps\\fps_patch_";
+    size_t length = wcslen(name);
+    SYSTEMTIME now;
+    DWORD error;
+
+    if (!wide_copy(folder, ARRAY_COUNT(folder), runtime->ini_path) ||
+        !path_replace_filename(folder, ARRAY_COUNT(folder), L"logs_fps")) {
+        return;
+    }
+    if (!CreateDirectoryW(folder, NULL)) {
+        error = GetLastError();
+        if (error != ERROR_ALREADY_EXISTS) return;
+    }
+    GetLocalTime(&now);
+    append_digits(name, &length, now.wYear, 4);
+    name[length++] = L'-';
+    append_digits(name, &length, now.wMonth, 2);
+    name[length++] = L'-';
+    append_digits(name, &length, now.wDay, 2);
+    name[length++] = L'_';
+    append_digits(name, &length, now.wHour, 2);
+    name[length++] = L'-';
+    append_digits(name, &length, now.wMinute, 2);
+    name[length++] = L'-';
+    append_digits(name, &length, now.wSecond, 2);
+    name[length] = L'\0';
+    if (!wide_append(name, ARRAY_COUNT(name), L".log")) return;
+    if (!wide_copy(folder, ARRAY_COUNT(folder), runtime->ini_path) ||
+        !path_replace_filename(folder, ARRAY_COUNT(folder), name)) {
+        return;
+    }
+    wide_copy(runtime->log_path, ARRAY_COUNT(runtime->log_path), folder);
+}
+
 static BOOL CALLBACK initialize_runtime_files_once(
     PINIT_ONCE init_once, PVOID parameter, PVOID *context) {
     Runtime *runtime = (Runtime *)parameter;
@@ -50,6 +101,7 @@ static BOOL CALLBACK initialize_runtime_files_once(
     }
 
     ini_found = config_load(&runtime->config, runtime->ini_path);
+    if (runtime->config.logging && runtime->config.log_history) use_session_log_path(runtime);
     log_open(runtime->log_path, runtime->config.logging);
     log_line("fps_patch bootstrap");
     log_text("Resolved target: ");

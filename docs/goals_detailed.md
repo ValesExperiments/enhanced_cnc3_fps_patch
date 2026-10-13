@@ -1139,6 +1139,142 @@ GDI missile soldiers in mission 1).
 
 ---
 
+## B26. Stream vertex buffer overrun → stretched polygons, crash, freeze (2026-10-13)
+
+**Status:** done, confirmed 2026-10-13 (no more crashes).
+
+- **Report:** the game froze (sound kept playing) ~10 s into play, again on
+  Firestorm "Alexandra" with Tiberium Troopers; `multicore_verify=1` showed
+  0 mismatches. Earlier: a crash (B25) and "random stretching geometry".
+- **Freeze diagnosis (live process, `tools_and_docs_by_claude/hang_sample.py`,
+  scripts in `temp/hang_1013/`):** no thread busy; a deadlock:
+  - main thread owns the game allocator's critical section
+    (`0x06B10988`, recursion 2) and waits in `EnterCriticalSection` for a
+    subsystem lock (`[obj+0x4C]`, via `0x8031D6`/`0x84B66A`);
+  - a worker thread (job `0x80E8C2` → … → `0x7FDB87` → allocator callback
+    `[0xC179A0]` → `0x402EA6` → `0x8A0C14` → `0x89C7EF`) owns that lock
+    and waits for the allocator.
+  - The main thread held the allocator lock with no allocator frame on its
+    stack: an exception record left in its stack (`0x1AE720`, context at
+    `0x1AE770`) shows an **access violation in the allocator**
+    (`0x8A2B0B`, segment walk reading a garbage size, ECX = segment
+    `0x51930000`) that the game's top-level handler swallowed, leaking the
+    lock.
+- **What corrupted the heap:** the segment header at `0x51930000` (and 26 KB
+  after it) was overwritten by **64-byte vertices** (position on the
+  ground, normal, UVs with V increasing along a strip). They run from
+  `0x518D4000` across the end of a 16 MB write-combined region
+  (`0x50930000`–`0x51930000`, a DXVK-mapped vertex buffer) straight into the
+  next allocation, the allocator's segment. Inside the mapped region the
+  same overrun lands on other geometry: the stretched polygons.
+- **Writer:** `W3DStreamDraw`'s stream (`StreamDraw::Stream`, TW 1.9):
+  - constructor `0x4DFD80`: segments `S = clamp(data+0x14, 4, 32)`; the
+    buffers (`0x4DF6C0`) hold `(S+1)·512` vertices of 64 bytes and 256
+    strips of indices, sized once;
+  - update `0x4E0002` (per client frame): frame = `GameClient` vtable +0x78;
+    if it changed, `dt = Δframes / client-FPS float` (`0x4DEA05`: age +=
+    dt / lifetime), **append one point** (`0x4DFC38` → `push_back`),
+    recompute and refill. Points expire at age 1 (`0x4DFAC6`).
+  - So a stream holds lifetime × client-FPS points: ~5× retail at 155 FPS,
+    and long sprays (Corrupter Tioxin, used by Firestorm's Tiberium
+    Trooper) overran the buffer.
+- **Fix `stream_rate`:** both frame reads (update and constructor,
+  `MOV EAX,[ECX]; CALL [EAX+78h]`) go through `get_retail_visual_frame` (the
+  synthetic 30 Hz frame, as the cloud/Anim2D reads) and the update's
+  `DIVSS [client-FPS float]` operand points at a constant 30.0. A stream
+  then grows, ages and is rebuilt exactly as at 30 FPS (its shape updates
+  at 30 Hz, as in vanilla). Resolver: update pattern (GameClient pointer and
+  client-FPS float operand checked against the resolved layout) and
+  constructor pattern; unique on all four builds (TW 1.10 `0x4749D9`
+  `0x47488F` `0x4749EF`; TW 1.9 `0xE0016` `0xDFECC` `0xE002C`; KW 1.03
+  `0x429FF1` `0x429EA7` `0x42A007`; KW 1.02 `0xE09FF` `0xE08B5` `0xE0A15`).
+- Bisect name: `stream_rate`.
+- **Sweep for similar code (2026-10-13):** every function that reads the
+  GameClient frame number (vtable +0x78 after loading `TheGameClient`):
+  95 in TW 1.10 (list in `temp/frame_readers_110.txt`, decompiled candidates
+  in `temp/frame_candidates_110.txt`; TW 1.9 scan `temp/frame_readers.py`).
+  - Only the stream appended per new frame into a buffer sized once. No
+    other overrun risk found.
+  - Most others are stamps, per-frame throttles, or already handled
+    (particles, tracers, physics springs, Anim2D, drawable interpolation).
+  - Frame-counted timers that would run faster above 30 FPS (visual speed
+    only; not reported by the user, not changed): `FloatingTextDisplay`
+    (`0x9F3DB1`, floating text rises/fades per frame), scripted camera
+    moves (`0x82EBB7` state 3 → `0x809F08`, one step per frame),
+    `W3DScriptedModelDraw` frame accumulator (`0x867572`, +0x2AC),
+    blink helpers (`0x9EEDF7`, `0x9F0594`, `0x79A12D`), the +1/30 blend in
+    `0x850FFE`, and `W3DProjectedShadowManager` fades (`0x855674`, frame
+    stamps). If one of these shows up, retime it like the others.
+
+## B25. Crash in the GPU particle storage (2026-10-13)
+
+**Status:** explained by B26 (the stream vertex overrun corrupts the heap).
+
+- **Event:** TW 1.9 + Firestorm 1.12, 155 FPS target with adaptive pacing,
+  ~2,568 s into a mission (rates dropping 148 → 86 in a heavy battle).
+  Windows log: `0xC000001D` (illegal instruction) at `0x1A576437` (no
+  module), then an access violation in the game's own handler at
+  `cnc3game.dat+0x4A0ED7`. Dumps copied to `temp/crash_1013/` (stacks only,
+  no heap).
+- **Chain (TW 1.9 VAs):** our `update_particles_at_retail_rate`
+  (`dinput8+0xF13B`, named with `tools_and_docs_by_claude/pdb_syms.py`) →
+  the manager's system loop (`0x7585FA`, list at manager +0x24) →
+  `ParticleSystem` update `0x75803E` → `0x74CFF1` → storage
+  `[system+0x84]` vtable +0x20 = `0x75C24E` (shared by
+  `GPUParticleSystemStorageModule` and `TerrainFireSystemStorageModule`): a
+  time-ordered queue whose expired front elements are deleted by
+  `0x75B3F4` (`call [vtable]`, deleting destructor). The front element's
+  "vtable" was `0x42DE9A4F` (the float 111.3): the element's memory had been
+  freed and reused.
+- **Ruled out:**
+  - The GPU particle clock (`sync_ms × client_fps / 1000` at `0x75C257`;
+    creation `sync_ms × 0.03` at `0x753A9F`): our patch already points the
+    expiry operand at a constant 30, so adaptive rate changes can't make it
+    jump (checked: nothing disabled, 82 patch writes installed).
+  - Trail/swarm code (B16/B17): this storage's trail/swarm casts return
+    null.
+  - The M1 particle index: the loop walks the indexed list, but TW 1.9 has
+    exactly 3 erase calls and 1 insert call to the list helpers, all
+    hooked; a stale entry also has to pass "still linked" and "same key"
+    checks.
+  - Our wrapper calls the stock update 30 times per second, as vanilla.
+- **Round 2 (user: Firestorm mission "Alexandra", while a Tiberium Trooper
+  sprayed liquid Tiberium):**
+  - Firestorm 1.12's spray effects: `XPCG_LiquidTibDistort` and
+    `XPCG_LiquidTibSteam01` (GPU), `XPCG_LiquidTibSpark` (TRAIL),
+    `NODTibTrooperContaminationZoneDecal` (CPU). No template in the mod uses
+    `GPU_TERRAINFIRE`, so the storage was the GPU one.
+  - GPU storage (TW 1.9 vtable `0xAB0B78`): +0x10 `0x75E855` adds a batch (a
+    0x60-byte element, ctor `0x753A9F`, slot in a shared GPU page from
+    `[0xC15A70]`, pushed onto the queue +0x18); +0x20 expires batches; first
+    use `0x75E74F` shares a pool object (+0x14) with an initialized sibling
+    of the same template (the search M1b narrows to the template's group).
+  - Checked our writers on these paths: the CPU draw wrapper uses the
+    storage's count/get, and the GPU storage's get always returns NULL (no
+    writes); the trail wrapper only blends points the stock trim
+    (`0x756115`: live = particle +0x40 ≠ 0, keeps TrailLife) leaves alone, and
+    restores before anything is freed; M3a writes the same value to the
+    same vertex address. Nothing of ours frees or writes a GPU batch.
+- **Round 3 (user: "stretching geometry" seemed gone with
+  `multicore_trail_fix=0`; the verify run's log was overwritten by a later
+  launch, so no index data):**
+  - M3a re-checked on TW 1.9 (builder `0x7592CB`, patch `0x75955D`): first
+    vertex V = `cvtsi2ss [EBP-4] / [EBP-0x24] * [EDX+0xC]` with
+    EDX = `[EBP-0x10]`; at the patch EDX is reloaded from `[EBP-0x10]`,
+    `[EBP-4]`/`[EBP-0x24]` are unchanged, XMM0 is dead, no branch lands
+    inside the 7 bytes. The shipped stub's bytes are exactly those
+    instructions. So M3a writes the identical V and cannot change geometry.
+  - Trail draw `0x75A5E1`: trim first, then sizes the dynamic VB from the
+    current counts (2 vertices per point, 6 indices per segment, trails
+    with ≤ 1 point skipped); the builder writes exactly that. Our TrailLife
+    +1 happens before the sizing, so no overflow.
+  - Conclusion: the stretching is most likely random (it was also seen at
+    30 FPS); one session without M3a isn't conclusive.
+- **If it happens again:** note the mission and what was on screen; try a
+  session with `multicore_particle_index=0` (or `multicore_verify=1`, which
+  checks every index answer against the original scan and counts
+  mismatches in the log).
+
 ## B24. Rain-reflective ground flickers (GDI "White House")
 
 **Status:** closed, not our bug (2026-10-12). The user confirmed it is a

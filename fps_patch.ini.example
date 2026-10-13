@@ -18,6 +18,11 @@ adaptive_fps=1
 ; Write fps_patch.log next to the DLL.
 logging=1
 
+; Keep a log per game session instead of overwriting fps_patch.log: each
+; session writes logs_fps\fps_patch_<date>_<time>.log next to the DLL
+; (requires logging=1). Old logs are never deleted. 0 = off (default).
+log_history=0
+
 ; Diagnostic: log this many frames of one moving vehicle's interpolation
 ; to fps_patch.log (requires logging=1). 0 = off.
 debug_motion_frames=0

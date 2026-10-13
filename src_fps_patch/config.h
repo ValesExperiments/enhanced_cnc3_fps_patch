@@ -9,6 +9,8 @@ typedef struct Config {
     BOOL valid;
     u32 target_fps;
     BOOL logging;
+    /* Keep every session's log: logs_fps\fps_patch_<date>_<time>.log. */
+    BOOL log_history;
     /* Diagnostic: client frames of one moving vehicle to log (0 = off). */
     u32 debug_motion_frames;
     /* Diagnostic: client frames of frame-pacing data to log (0 = off). */

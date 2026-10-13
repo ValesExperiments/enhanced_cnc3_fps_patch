@@ -43,6 +43,8 @@ working too. It is only lightly modified from TW, so TW fixes should carry over.
 | B22 | Turrets should pitch (aim up/down) smoothly, like they already turn | **Done** (`turret_pitch`, vanilla bug, confirmed 2026-10-12) |
 | B23 | Barrel recoil (Juggernaut, Mammoth, every `WeaponRecoilBone`) must play at retail speed | **Done** (`recoil_rate`, confirmed 2026-10-12) |
 | B19 | Newly produced aircraft (Firestorm airfield) must not show in the air for one frame | **Done** (`teleport_snap`: teleports snap instead of sliding; confirmed 2026-10-12, teleporting units fine) |
+| B26 | Liquid-spray streams (Firestorm Tiberium Trooper, Scrin Corrupter) overran their vertex buffer at high FPS: stretched polygons, heap corruption → crash (B25) or freeze | **Done** (`stream_rate`, confirmed 2026-10-13: no more crashes); sweep of other per-frame frame readers found no other overrun |
+| B25 | Crash after ~42 min (TW 1.9 + Firestorm, big battle): GPU particle queue deletes an already-freed element | Explained by B26 (heap corruption from the stream overrun) |
 | B24 | Ground (Firestorm GDI "White House") must not show bright straight-edged patches that move with the camera | **Closed, not ours**: a Firestorm mod issue (the mod shows similar geometry glitches at 30 FPS; reloading clears it) |
 | B20 | Build menu icons must not vanish for one frame after clicking a build button | **Done** (`button_enable_tick`, confirmed 2026-10-12) |
 

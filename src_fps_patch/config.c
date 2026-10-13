@@ -5,6 +5,7 @@ void config_set_defaults(Config *config) {
     config->valid = TRUE;
     config->target_fps = 90;
     config->logging = TRUE;
+    config->log_history = FALSE;
     config->debug_motion_frames = 0;
     config->debug_frame_times = 0;
     config->debug_trail_draws = 0;
@@ -38,6 +39,8 @@ BOOL config_load(Config *config, const wchar_t *path) {
     config->valid = (fps >= 45 && fps <= 90 && fps % 15 == 0) || (fps > 90 && fps <= 240);
     config->target_fps = config->valid ? (u32)fps : 0u;
     config->logging = GetPrivateProfileIntW(L"fps_patch", L"logging", config->logging, path) != 0;
+    config->log_history =
+        GetPrivateProfileIntW(L"fps_patch", L"log_history", config->log_history, path) != 0;
     config->debug_motion_frames = GetPrivateProfileIntW(
         L"fps_patch", L"debug_motion_frames", config->debug_motion_frames, path);
     config->debug_frame_times = GetPrivateProfileIntW(
