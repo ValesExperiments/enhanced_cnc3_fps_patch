@@ -157,6 +157,7 @@ static int check(const char *path) {
         { "recoil", resolve_recoil_sites },
         { "button_enable", resolve_button_enable_sites },
         { "stream", resolve_stream_sites },
+        { "laser_draw", resolve_laser_draw_sites },
     };
     IMAGE_NT_HEADERS32 *nt;
     GameLayout game, full;
@@ -264,6 +265,8 @@ static int check(const char *path) {
         printf("  stream frame reads 0x%X 0x%X, FPS divisor operand 0x%X\n",
                full.stream.update_frame_call, full.stream.ctor_frame_call,
                full.stream.fps_divisor_operand);
+        printf("  laser draw copy 0x%X (update 0x%X, create 0x%X)\n", full.laser_draw.function,
+               full.laser_draw.update, full.laser_draw.create);
         printf("  history refresh 0x%X (%s)\n", full.history_refresh.function,
                full.history_refresh.kane ? "KW, 2 args" : "TW, 1 arg");
         printf("  apt call variants %u: 0x%X 0x%X 0x%X 0x%X 0x%X\n", full.apt_calls.count,

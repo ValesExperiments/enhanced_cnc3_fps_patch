@@ -1139,6 +1139,153 @@ GDI missile soldiers in mission 1).
 
 ---
 
+## B28. Occasional crash while the game starts (2026-10-14)
+
+**Status:** watching (not caused by the patch as far as the evidence goes).
+
+- Two crashes with the identical stack (10/13 13:47 with an older DLL,
+  10/14 15:50 with the current one), both while the shell/menu loads,
+  ~1 s after the patch installed (before the first adaptive-pacing line).
+  Dumps in `temp/crash_1014/`. Sessions in between started fine.
+- Fault `cnc3game.dat+0x10A4E5` (TW 1.9 `0x50A4DA`): removing an observer
+  from a global list (`0x44954D` → list at `0xBEDD78`) walks nodes via +4 and
+  reads a garbage node: `EAX = 0xFFFFFFFF` (10/14), ASCII `"_lic"`/`"-tf"`
+  (10/13). Caller `0x44A1B3` = destructor of
+  `GlobalResourceManagerStreamObserver` (vtable `0xA33520`), constructed
+  on the stack (`lea ecx,[ebp-0x64]` at `0x5B2F4C`) in the asset-streaming
+  code (`0x5B2E6A` ← `0x5B9299`).
+- Reading: an earlier observer stayed in the list after its stack frame was
+  gone (e.g. a load that bailed out without its destructor), so the list
+  points at reused stack memory (strings). No patch code is on the stack or
+  touches the resource manager; the system dinput8's frame on the stack is
+  not ours.
+- If it gets frequent: launch several times without the DLL to see whether
+  vanilla+Firestorm does it too.
+
+## B27. Huge stretched geometry: the Reckoner, not the Beam Cannon (2026-10-13/14)
+
+**Status:** diagnosing.
+
+- **Report:** stretched geometry again, the user thinks with Firestorm's Beam
+  Cannon (`LaserDraw` ×4 with `Laser.fx`, beams from
+  `BeamSpecialAbilityUpdate`, `JoinWithOtherBeams="true"`).
+- **Laser renderer (TW 1.10):** `W3DLaserManager` (vtable `0xACD7D4`) keeps
+  a pool of 256 lasers (+0x5C24 count, +0x5C28 array); a laser
+  (`0x86BD92`) stores its texture/scroll data and its start frame (+0x50).
+  Lasers are grouped per shader (0x40C-byte records: count + 256 pointers);
+  the render (`0x86C815`) gathers a list into a 256-entry stack array and
+  `0x86BF51` writes 4 vertices (64 bytes each) per laser into a VB of
+  1024 vertices (`0x86C5DD`: `FUN_0073A559(0, 0x400, 1, 0x40)`), indices for
+  256 quads. Bounded by the pool, so **no overrun**.
+- **Found instead:** `0x86BF51` uses `(frame − start) × 1/30` as seconds
+  for the texture scroll and texture-frame animation, so beams scroll ~5×
+  too fast at 155 FPS (visual only). A fix would redirect the two frame
+  reads (`0x86BD92`, `0x86BF51`) to the synthetic 30 Hz frame.
+- **Screenshot (round 1):** a huge soft-edged orange wedge with one corner at
+  the Beam Cannon's barrel and the normal beam gone. That is a laser quad
+  whose end point is garbage (behind the camera or enormous): the glow
+  texture stretched over the screen. (The minimap flash was the "unit under
+  attack" indicator; the target was **alive**, so "target died" is ruled
+  out.)
+- **Where the end point comes from:** `W3DLaserDraw` update (`0x8467C3`,
+  once per new client frame) takes start/end from the object's beam
+  interface (`0x83E231`, behaviour virtual +0x34 → getStart/getEnd) or its
+  `LaserStateModule` (`0x83E1CA`, start +0x2C, end +0x38; active +100):
+  logic data, not touched by the patch. Open suspicion: above 90 FPS frames
+  are drawn between logic phases (vanilla draws only after phase 3 or 6),
+  so the draw could read a beam's points mid-update. Not proven; the
+  diagnostic below records the phase of each odd frame.
+- **Guard `laser_guard` (implemented 2026-10-13, needs a test):** the stock
+  update-and-copy (`0x846877`, 8-byte entry `JMP`) is reimplemented in C
+  (`laser_draw_update`): same update/create calls, then a point with a
+  non-finite coordinate or one beyond ±100,000 collapses the laser to its
+  valid end for that frame (logged, max 20 lines per session). Resolver:
+  the whole function (identical in all four builds; TW 1.10 `0x446877`,
+  TW 1.9 `0xB2826`, KW 1.03 `0x3FB72A`, KW 1.02 `0xB2A30` RVAs).
+- **Round 2 (2026-10-14, video `temp/videos/…3-42-27 PM.mp4`, frames in
+  `temp/videos/frames/`):** the user found it's the **Reckoner** (Firestorm
+  Nod Reckoner / Reckoner Deployed): a wide, dark, translucent band from the
+  deployed Reckoner to the top of the screen, visible for many seconds
+  (≈7–40 s and again at the end) and **lit up by the selection/attack
+  highlight**, so it is the unit's own mesh (stretched skinning). The
+  orange screen-filling plane (17–22 s) is likely the same thing seen from
+  another angle. The laser theory is dropped (the guard stays as a harmless
+  safety check).
+  - Firestorm `GameObject:NODReckonerDeployed` (strings from the compiled
+    asset, `temp/GameObject_NODReckonerDeployed.bin`): unpack animation
+    `ONCE` while `UNPACKING`, then `MANUAL` + `START_FRAME_LAST` (held on the
+    last frame); rooftop TV/speakers (`FX_ROOF_TV` at `BONE_ROOF`, `LOOP`,
+    `MAINTAIN_FRAME_ACROSS_STATES`); no turret; recoil settings but no
+    `WeaponRecoilBone` (`BONE_EXTB*` are damage-FX particle bones). So B21,
+    B22 and B23 don't apply.
+  - Suspicion only: a held/looped animation sampled past its last keyframe
+    (garbage bone transforms). Next: is it vanilla (DLL off, 30 FPS,
+    deploy/undeploy several Reckoners)? If not, bisect with
+    `debug_disable`; since the band persists, a live process with the glitch
+    on screen can be inspected (`hang_sample.py`-style reads).
+- **Round 3 (2026-10-14):** the user saw it again (also near Firestorm's
+  Scorpion Tank) and paused the game with the band on screen (PID 9092,
+  TW 1.9). They had confirmed it does not happen at 30 FPS without the DLL
+  (one run). The video frames show the band starting exactly when a green
+  Tiberium spray (a `W3DStreamDraw` stream) starts. The band is a
+  **constant-width, dark, see-through strip lying on the terrain** from the
+  unit to off-screen. Everything below was checked read-only on the paused
+  process (scripts in `temp/b27_live/`) or in Ghidra (TW 1.10), and is
+  **ruled out**:
+  - **Streams / my B26 `stream_rate` fix.** Each stream owns its vertex
+    buffer (`0x87411F` → `DX8VertexBufferClass` `0x73A559` → `0x7370D9`:
+    `CreateVertexBuffer(DYNAMIC|WRITEONLY, DEFAULT pool)`), locked with
+    `DISCARD` (`0x5AE7E7` → `0x731687`, `IDirect3DVertexBuffer9::Lock`) by
+    the fill `0x87351C`. D3D9 keeps that data between draws, so drawing it
+    at 155 FPS while it's rebuilt at 30 Hz is fine. `W3DStreamManager`
+    (vtable `0xACD8BC`) draws every stream each frame in one of two passes
+    (`0x86CE3B` / `0x86CE6B`, the byte at stream+0x54 picks the pass;
+    draw `0x87338A`) with (points − 1) × S quads. The geometry builder
+    `0x8748E8` writes exactly one 0x18-byte entry per point (position from
+    the age curve `0x873086`), and the fill builds rings from the frame
+    (dir × up, dir, (dir × up) × dir), so every vertex stays within the
+    radius (+0x48) of its point. Expiry `0x874489` only drops points whose
+    age (+0x4C) left 0..1, and ages only move in the 30 Hz rebuild
+    (`0x873452`). Live: 6 streams, 36/36 points/geometry entries (one 6/6),
+    largest step between neighbouring points 30 units, no NaN.
+    (`stream_geom.py`)
+  - **Skinning.** The 0x48-byte HTree pivot record is: +0 ?, +4 parent
+    pointer, +8 local quaternion, +0x18 local translation, +0x24 posed
+    quaternion, +0x34 posed translation (model space for skinned units, world
+    for simple 2-pivot props), +0x40 index. All 1,711 skeletons have unit
+    quaternions and no bone more than 400 units from the median, except one
+    8-bone model with a bone 1,372 units straight up (an attachment, the
+    same on two copies). (`bone_scan_tight.py`, `near_models.py`)
+  - **Render-object transforms** (3×4 at +0x18): every placed HLod
+    (`0xA3043C`, 1,330), mesh (`0xA310E4`, 3,602) and `0xA2F164` (898) is a
+    pure rotation; no scale or shear. (`xform_scan.py`)
+  - **Animation sampling past the end.** `HCompressedAnimClass` (vtable
+    `0xAB453C`: frames +0x20, rate +0x28, channels +0x2C, 0x14 per pivot);
+    the adaptive-delta decoder `0x733DF6` stops at the channel's frame count
+    and returns the last value; time-coded `0x7357A0` uses the last key at
+    the end. Both safe.
+  - **`multicore_trail_fix`.** The patched builder is `TrailDrawModule`'s
+    `0x5BA171` (missile/smoke trails, not streams). Re-checked the stub: at
+    the read-back EDX = [EBP-0x10] = module data (same `[EDX+0xC]` scale as
+    the first vertex), so it writes the identical V. Correct.
+  - **Track marks:** 11 live tracks, all healthy, none near the Reckoner
+    (a deployed Reckoner doesn't move). **Timed decal fades**
+    (`0x855674`): fade by frame, can't stretch.
+  - GPU-side buffers can't be read: DXVK (32-bit) unmaps them; the 9
+    write-combined regions hold no world-space vertices while paused.
+  - So the CPU-side data of every candidate is clean. The band is either
+    GPU-side data corrupted by something else (an overrun like B26 into a
+    neighbouring buffer), or Firestorm's own "random stretching geometry"
+    (seen at 30 FPS, B24) made more frequent by the higher rate.
+- **Next: bisect run** (`debug_disable` with every non-core feature except
+  `stream_rate`, which is the B26 crash fix): if the band still appears, it
+  is the game/mod running above 30 FPS (like B19), not one of our fixes.
+- **Diagnostic `debug_laser_draws=N`:** logs laser frames longer than 3,000
+  units or whose end point jumps more than 500 units, with logic phase,
+  interpolation fraction and the shooter's position. If the glitch comes
+  back without a "laser guard" line, the bad point was finite: the
+  diagnostic shows its value and the phase.
+
 ## B26. Stream vertex buffer overrun → stretched polygons, crash, freeze (2026-10-13)
 
 **Status:** done, confirmed 2026-10-13 (no more crashes).

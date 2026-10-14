@@ -301,6 +301,17 @@ Fix or remove anything that turns out to be wrong.
   random stretching geometry even at 30 FPS. A terrain-patch glitch turned
   out to be the mod (cleared by reloading). For graphics bugs on mod maps,
   ask early: "does reloading clear it?" and "does it happen on a vanilla map?"
+- **Inspecting a paused game for render glitches (B27, 2026-10-14).** Scripts
+  in `temp/b27_live/` (read-only, exec the helpers of `hang_sample.py`):
+  `bone_scan_tight.py` (skeletons), `xform_scan.py` (render-object 3×4
+  transforms at +0x18), `stream_geom.py` (streams), `tracks_scan.py`,
+  `near_models.py <pid> x y r`. TW 1.9 vtables: HLod `0xA3043C`, mesh
+  `0xA310E4`, stream `0xA3E154`, TerrainTracks `0xA36BB4`. HTree pivot record
+  (0x48): +4 parent, +8/+0x18 local quat/pos, +0x24/+0x34 posed quat/pos.
+  **Limit:** DXVK (32-bit) unmaps vertex buffers, so GPU-side data can't be
+  read; if all CPU-side data is clean, go to a `debug_disable` bisect run.
+  `debug_disable` holds 511 characters: "all non-core except stream_rate" is 482.
+  Never disable `stream_rate` in a bisect (it's the B26 overrun/crash fix).
 - Diagnostics in `fps_patch.ini` (all need `logging=1`, 0 = off):
   `debug_motion_frames`, `debug_frame_times`, `debug_trail_draws` (per
   trail-system draw: frame, step, blend fraction, emitter position, per-trail

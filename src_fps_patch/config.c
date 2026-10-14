@@ -11,6 +11,7 @@ void config_set_defaults(Config *config) {
     config->debug_trail_draws = 0;
     config->debug_apt_calls = FALSE;
     config->debug_spawn_frames = 0;
+    config->debug_laser_draws = 0;
     config->adaptive_fps = TRUE;
     config->profiler = FALSE;
     config->profiler_report_seconds = 60;
@@ -63,6 +64,8 @@ BOOL config_load(Config *config, const wchar_t *path) {
         }
         config->debug_disable[i] = '\0';
     }
+    config->debug_laser_draws = GetPrivateProfileIntW(
+        L"fps_patch", L"debug_laser_draws", config->debug_laser_draws, path);
     config->adaptive_fps = GetPrivateProfileIntW(
         L"fps_patch", L"adaptive_fps", config->adaptive_fps, path) != 0;
     config->profiler = GetPrivateProfileIntW(L"fps_patch", L"profiler", config->profiler, path) != 0;

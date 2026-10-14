@@ -96,6 +96,19 @@ typedef struct TurretFractionLayout {
     u32 pitch_site;
 } TurretFractionLayout;
 
+typedef struct LaserDrawLayout {
+    /*
+     * B27: W3DLaserDraw's per-frame update-and-copy (TW 1.10 VA 0x846877,
+     * thiscall(draw), RET): calls the update (start/end from the object's
+     * laser state into draw +0x2C/+0x38, visible flag +0x28), creates the
+     * manager laser (+0x24) if needed, then copies start/end into the laser
+     * (+4, +0x10). RVAs of the function and its two callees.
+     */
+    u32 function;
+    u32 update;
+    u32 create;
+} LaserDrawLayout;
+
 typedef struct StreamLayout {
     /*
      * B26: W3DStreamDraw's stream (liquid sprays: Scrin Corrupter, Firestorm
@@ -544,6 +557,7 @@ typedef struct GameLayout {
     RecoilLayout recoil;
     ButtonEnableLayout button_enable;
     StreamLayout stream;
+    LaserDrawLayout laser_draw;
 } GameLayout;
 
 typedef enum GameResolveResult {

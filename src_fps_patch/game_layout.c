@@ -2112,6 +2112,26 @@ static BOOL resolve_button_enable_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, Game
     return TRUE;
 }
 
+/* W3DLaserDraw update-and-copy (identical in all four builds). */
+static const u16 g_laser_draw_copy_pattern[] = {
+    0x56, 0x8B, 0xF1, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x80, 0x7E,
+    0x28, 0x00, 0x74, 0x41, 0x83, 0x7E, 0x24, 0x00, 0x75, 0x0D, 0x8B, 0xCE, 0xE8, PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x83, 0x7E, 0x24, 0x00, 0x74, 0x2E, 0x8B, 0x46, 0x24,
+    0xD9, 0x46, 0x2C, 0x83, 0xC0, 0x04, 0xD9, 0x18, 0xD9, 0x46, 0x30, 0xD9, 0x58, 0x04, 0xD9,
+    0x46, 0x34, 0xD9, 0x58, 0x08, 0x8B, 0x46, 0x24, 0xD9, 0x46, 0x38, 0x83, 0xC0, 0x10, 0xD9,
+    0x18, 0xD9, 0x46, 0x3C, 0xD9, 0x58, 0x04, 0xD9, 0x46, 0x40, 0xD9, 0x58, 0x08, 0x5E, 0xC3
+};
+
+static BOOL resolve_laser_draw_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game) {
+    LaserDrawLayout *laser = &game->laser_draw;
+
+    return FIND_UNIQUE(module, nt, g_laser_draw_copy_pattern, &laser->function) &&
+           decode_relative_target(module, game->pe_size_of_image, laser->function + 3u, 0xE8,
+                                  &laser->update) &&
+           decode_relative_target(module, game->pe_size_of_image, laser->function + 22u, 0xE8,
+                                  &laser->create);
+}
+
 /*
  * Stream update: PUSH ESI; MOV ESI,ECX; CALL expire; previous = frame;
  * MOV ECX,[GameClient]; frame read; delta; CVTSI2SS; DIVSS [client FPS].
@@ -2561,6 +2581,7 @@ GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module) {
         !resolve_recoil_sites(module, nt, &game) ||
         !resolve_button_enable_sites(module, nt, &game) ||
         !resolve_stream_sites(module, nt, &game) ||
+        !resolve_laser_draw_sites(module, nt, &game) ||
         load_u32(module + game.timing.logic_fps) != 15u ||
         load_u32(module + game.timing.client_fps) != 30u ||
         module[game.pacing.display_limiter_branch] != 0x7D ||

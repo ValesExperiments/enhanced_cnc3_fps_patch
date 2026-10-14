@@ -50,6 +50,11 @@ debug_spawn_frames=0
 ; are listed in docs/goals_detailed.md. Empty = everything on.
 debug_disable=
 
+; Diagnostic: log this many suspicious laser-beam frames (beam longer than
+; 3000 units, or its end point jumping more than 500 units in one frame),
+; with the logic phase (requires logging=1). 0 = off.
+debug_laser_draws=0
+
 ; Diagnostic (multi-core research): sample where the game's main thread spends
 ; its time and write fps_profile.log next to the DLL every
 ; profiler_report_seconds. Costs about 3% of one CPU core. 1 = on, 0 = off.

@@ -3330,6 +3330,144 @@ static void install_stream_rate(PatchInstaller *installer) {
                   &g_stream_retail_fps);
 }
 
+/*
+ * B27: a laser beam (Beam Cannon, Obelisk, ...) is drawn as one quad from the
+ * start to the end point W3DLaserDraw reads from the object's laser state
+ * every frame. A garbage end point (seen once as a screen-filling wedge from
+ * a Beam Cannon whose target had just died) blows the quad up across the
+ * screen. The stock update-and-copy is reimplemented here with a check: a
+ * non-finite or absurdly distant point collapses the laser to its start for
+ * that frame (logged). debug_laser_draws=N also logs suspicious frames
+ * (length, jumps) with the logic phase.
+ */
+enum {
+    LASER_DRAW_OBJECT = 0x0C,
+    LASER_DRAW_LASER = 0x24,
+    LASER_DRAW_VISIBLE = 0x28,
+    LASER_DRAW_START = 0x2C,
+    LASER_DRAW_END = 0x38,
+    LASER_START = 0x04,
+    LASER_END = 0x10,
+    LASER_TRACK_SIZE = 512, /* power of two */
+    LASER_GUARD_LOG_MAX = 20
+};
+static const float LASER_ABSURD_COORDINATE = 100000.0f;
+static const float LASER_SUSPICIOUS_LENGTH = 3000.0f;
+static const float LASER_SUSPICIOUS_JUMP = 500.0f;
+
+typedef void(THISCALL *LaserDrawFn)(u8 *draw);
+static LaserDrawFn volatile g_laser_update;
+static LaserDrawFn volatile g_laser_create;
+static u32 g_laser_guard_logged;
+static u32 g_laser_lines;
+
+typedef struct LaserTrack {
+    const u8 *draw;
+    float end[3];
+} LaserTrack;
+static LaserTrack g_laser_track[LASER_TRACK_SIZE];
+
+static BOOL laser_point_valid(const float *point) {
+    u32 k;
+    for (k = 0; k < 3; ++k) {
+        /* NaN fails both comparisons. */
+        if (!(point[k] > -LASER_ABSURD_COORDINATE && point[k] < LASER_ABSURD_COORDINATE)) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static float laser_distance(const float *a, const float *b) {
+    float dx = a[0] - b[0];
+    float dy = a[1] - b[1];
+    float dz = a[2] - b[2];
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
+static void log_laser(const char *what, const u8 *draw, const float *start, const float *end,
+                      float jump) {
+    const u8 *engine = *(const u8 *const *)game_address(g_game, g_game->timing.game_engine_pointer);
+    void *game_client = *(void **)game_address(g_game, g_game->drawable_physics.game_client_pointer);
+    const u8 *drawable = *(const u8 *const *)(draw + LASER_DRAW_OBJECT);
+    const u8 *object = drawable != NULL
+        ? *(const u8 *const *)(drawable + g_game->waypoint_lines.drawable_object) : NULL;
+    const float *position = object != NULL
+        ? (const float *)(object + g_game->waypoint_lines.object_position) : NULL;
+
+    log_printf("laser %s draw=%p frame=%u phase=%u s=%.3f start=(%.1f,%.1f,%.1f) "
+               "end=(%.1f,%.1f,%.1f) jump=%.1f object=(%.1f,%.1f,%.1f)",
+               what, (const void *)draw,
+               game_client != NULL ? read_client_frame(game_client) : 0u,
+               engine != NULL ? *(const u32 *)(engine + ENGINE_CURRENT_LOGIC_PHASE) : 0u,
+               engine != NULL ? (double)*(const float *)(engine + ENGINE_LOGIC_PHASE_INTERPOLATION)
+                              : -1.0,
+               (double)start[0], (double)start[1], (double)start[2], (double)end[0],
+               (double)end[1], (double)end[2], (double)jump,
+               position != NULL ? (double)position[0] : 0.0,
+               position != NULL ? (double)position[1] : 0.0,
+               position != NULL ? (double)position[2] : 0.0);
+}
+
+static void THISCALL laser_draw_update(u8 *draw) {
+    float *start = (float *)(draw + LASER_DRAW_START);
+    float *end = (float *)(draw + LASER_DRAW_END);
+    u8 *laser;
+
+    g_laser_update(draw);
+    if (draw[LASER_DRAW_VISIBLE] == 0) return;
+    if (*(u8 **)(draw + LASER_DRAW_LASER) == NULL) {
+        g_laser_create(draw);
+        if (*(u8 **)(draw + LASER_DRAW_LASER) == NULL) return;
+    }
+    laser = *(u8 **)(draw + LASER_DRAW_LASER);
+    if (!laser_point_valid(start) || !laser_point_valid(end)) {
+        const float *keep = laser_point_valid(start) ? start : (laser_point_valid(end) ? end : NULL);
+        if (g_laser_guard_logged < LASER_GUARD_LOG_MAX) {
+            log_laser("guard", draw, start, end, 0.0f);
+            ++g_laser_guard_logged;
+        }
+        if (keep == NULL) {
+            /* Nothing usable: leave the laser where it was last frame. */
+            return;
+        }
+        memcpy(laser + LASER_START, keep, 3 * sizeof(float));
+        memcpy(laser + LASER_END, keep, 3 * sizeof(float));
+        return;
+    }
+    if (g_config->debug_laser_draws != 0 && g_laser_lines < g_config->debug_laser_draws) {
+        u32 slot = (u32)(((uintptr_t)draw >> 3) * 2654435761u) & (LASER_TRACK_SIZE - 1u);
+        LaserTrack *track = &g_laser_track[slot];
+        float jump = track->draw == draw ? laser_distance(track->end, end) : 0.0f;
+        if (laser_distance(start, end) > LASER_SUSPICIOUS_LENGTH || jump > LASER_SUSPICIOUS_JUMP) {
+            log_laser("suspicious", draw, start, end, jump);
+            ++g_laser_lines;
+        }
+        track->draw = draw;
+        memcpy(track->end, end, sizeof(track->end));
+    }
+    memcpy(laser + LASER_START, start, 3 * sizeof(float));
+    memcpy(laser + LASER_END, end, 3 * sizeof(float));
+}
+
+static void install_laser_guard(PatchInstaller *installer) {
+    const LaserDrawLayout *laser = &g_game->laser_draw;
+    u8 expected[8];
+    u8 jump[8] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90 };
+
+    memcpy(expected, game_address(g_game, laser->function), sizeof(expected));
+    if (expected[0] != 0x56 || expected[1] != 0x8B || expected[2] != 0xF1 || expected[3] != 0xE8) {
+        installer->ok = FALSE;
+        return;
+    }
+    g_laser_update = (LaserDrawFn)game_address(g_game, laser->update);
+    g_laser_create = (LaserDrawFn)game_address(g_game, laser->create);
+    encode_rel32(&jump[1], game_address(g_game, laser->function + 5u),
+                 (const void *)laser_draw_update);
+    patch_bytes(installer, "laser draw update (guard)", laser->function, expected, jump,
+                sizeof(jump));
+}
+
 static void install_frame_authored_effects(PatchInstaller *installer) {
     const VisualLayout *visual = &g_game->visual;
 
@@ -4687,6 +4825,7 @@ BOOL game_patches_install(const GameLayout *game, const Config *config) {
     INSTALL_FEATURE(recoil_rate);
     INSTALL_FEATURE(button_enable_tick);
     INSTALL_FEATURE(stream_rate);
+    INSTALL_FEATURE(laser_guard);
     INSTALL_FEATURE(drawable_interpolation_window);
     INSTALL_FEATURE(particle_and_cursor_timing);
     INSTALL_FEATURE(phase_scheduler);
@@ -4781,6 +4920,9 @@ void game_patches_reset_state(void) {
         g_shroud_cells = NULL;
         g_frame_times_logged = 0;
         g_trail_draws_logged = 0;
+        g_laser_guard_logged = 0;
+        g_laser_lines = 0;
+        memset(g_laser_track, 0, sizeof(g_laser_track));
         memset(g_trail_history, 0, sizeof(g_trail_history));
         g_pulse_frame_known = FALSE;
         particle_index_reset();
